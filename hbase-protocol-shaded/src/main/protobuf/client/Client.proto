@@ -366,7 +366,16 @@ message ScanResponse {
   // If the Scan need cursor, return the row key we are scanning in heartbeat message.
   // If the Scan doesn't need a cursor, don't set this field to reduce network IO.
   optional Cursor cursor = 12;
-}
+
+  // The suggested ReadType for next scan request. Client can make use of this
+  // suggested read type when scan moves on to next region
+  enum ReadType {
+      DEFAULT = 0;
+      STREAM = 1;
+      PREAD = 2;
+    }
+    optional ReadType readType = 13 [default = DEFAULT];
+  }
 
 /**
  * Atomically bulk load multiple HFiles (say from different column families)
