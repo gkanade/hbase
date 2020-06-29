@@ -300,6 +300,14 @@ message ScanRequest {
   optional bool renew = 10 [default = false];
   // if we have returned limit_of_rows rows to client, then close the scanner.
   optional uint32 limit_of_rows = 11 [default = 0];
+  // The suggested ReadType for scan request. Client can make use of this
+  // suggested read type when scan moves on to next region
+  enum ReadType {
+    DEFAULT = 0;
+    STREAM = 1;
+    PREAD = 2;
+  }
+  optional ReadType readType = 12 [default = DEFAULT];
 }
 
 /**
