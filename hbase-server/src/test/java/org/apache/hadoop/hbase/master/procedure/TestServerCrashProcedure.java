@@ -89,8 +89,6 @@ public class TestServerCrashProcedure {
     //collectMasterMetrics();
     MiniHBaseCluster cluster = this.util.getHBaseCluster();
     HMaster master = cluster == null? null: cluster.getMaster();
-    LOG.info("Submitted count", master.getMasterMetrics().getServerCrashProcMetrics().getSubmittedCounter().getCount());
-    LOG.info("Histo count", master.getMasterMetrics().getServerCrashProcMetrics().getTimeHisto().getCount());
 
     if (master != null && master.getMasterProcedureExecutor() != null) {
       ProcedureTestingUtility.setKillAndToggleBeforeStoreUpdate(
@@ -168,6 +166,10 @@ public class TestServerCrashProcedure {
       LOG.error("Test failed!", throwable);
       throw throwable;
     }
+
+    LOG.info("Submitted count", this.util.getHBaseCluster().getMaster().getMasterMetrics().getServerCrashProcMetrics().getSubmittedCounter().getCount());
+    LOG.info("Histo count", this.util.getHBaseCluster().getMaster().getMasterMetrics().getServerCrashProcMetrics().getTimeHisto().getCount());
+
   }
 
   protected Table createTable(final TableName tableName) throws IOException {
