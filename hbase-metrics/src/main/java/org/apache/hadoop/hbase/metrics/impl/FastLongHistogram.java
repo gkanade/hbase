@@ -127,6 +127,7 @@ public class FastLongHistogram {
       System.out.println("Adding to histogram count");
       System.out.println(count);
       AtomicUtils.updateMin(min, value);
+      System.out.println("Min is now" + min);
       AtomicUtils.updateMax(max, value);
 
       this.count.add(count);
@@ -223,6 +224,7 @@ public class FastLongHistogram {
 
     public long getMin() {
       long min = this.min.get();
+      System.out.println("Getting min" + min);
       return min == Long.MAX_VALUE ? 0 : min; // in case it is not initialized
     }
 
