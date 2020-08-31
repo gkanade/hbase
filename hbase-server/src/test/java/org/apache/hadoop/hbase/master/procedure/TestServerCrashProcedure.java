@@ -59,6 +59,7 @@ public class TestServerCrashProcedure {
   private ProcedureMetrics serverCrashProcMetrics;
   private long serverCrashSubmittedCount = 0;
   private long serverCrashFailedCount = 0;
+  private long serverCrashHistoCount = 0;
 
   private void setupConf(Configuration conf) {
     conf.setInt(MasterProcedureConstants.MASTER_PROCEDURE_THREADS, 1);
@@ -85,6 +86,8 @@ public class TestServerCrashProcedure {
 
   @After
   public void tearDown() throws Exception {
+    collectMasterMetrics();
+    LOG.info("Histo count", serverCrashHistoCount);
     MiniHBaseCluster cluster = this.util.getHBaseCluster();
     HMaster master = cluster == null? null: cluster.getMaster();
     if (master != null && master.getMasterProcedureExecutor() != null) {
@@ -174,5 +177,6 @@ public class TestServerCrashProcedure {
   private void collectMasterMetrics() {
     serverCrashSubmittedCount = serverCrashProcMetrics.getSubmittedCounter().getCount();
     serverCrashFailedCount = serverCrashProcMetrics.getFailedCounter().getCount();
+    serverCrashHistoCount = serverCrashProcMetrics.getTimeHisto().getCount();
   }
 }
