@@ -117,4 +117,18 @@ public class TestHistogramImpl {
     assertEquals(998, snapshot.get999thPercentile());
 
   }
+
+  @Test
+  public void testGaurav() {
+    HistogramImpl histogram = new HistogramImpl();
+    histogram.update(22066);
+    histogram.update(11586);
+    histogram.update(2772);
+
+    System.out.println("Max " + histogram.getMax());
+
+    Snapshot snapshot = histogram.snapshot();
+    System.out.println("Snapshot Max " + snapshot.getMax());
+    System.out.println("Snapshot Min " + snapshot.getMin());
+  }
 }
