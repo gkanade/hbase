@@ -23,18 +23,16 @@ import static org.junit.Assert.assertTrue;
 import java.io.IOException;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.HBaseClassTestRule;
-import org.apache.hadoop.hbase.HBaseTestingUtility;
-import org.apache.hadoop.hbase.MiniHBaseCluster;
-import org.apache.hadoop.hbase.ServerName;
-import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.*;
 import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.master.HMaster;
+import org.apache.hadoop.hbase.master.MetricsMasterSource;
 import org.apache.hadoop.hbase.master.assignment.AssignmentTestingUtil;
 import org.apache.hadoop.hbase.procedure2.ProcedureExecutor;
 import org.apache.hadoop.hbase.procedure2.ProcedureMetrics;
 import org.apache.hadoop.hbase.procedure2.ProcedureTestingUtility;
+import org.apache.hadoop.hbase.test.MetricsAssertHelper;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.junit.After;
@@ -60,6 +58,9 @@ public class TestServerCrashProcedure {
   private long serverCrashSubmittedCount = 0;
   private long serverCrashFailedCount = 0;
   private long serverCrashHistoCount = 0;
+
+  private static final MetricsAssertHelper metricsHelper =
+          CompatibilityFactory.getInstance(MetricsAssertHelper.class);
 
   private void setupConf(Configuration conf) {
     conf.setInt(MasterProcedureConstants.MASTER_PROCEDURE_THREADS, 1);
@@ -169,6 +170,11 @@ public class TestServerCrashProcedure {
 
     LOG.info("Submitted count", this.util.getHBaseCluster().getMaster().getMasterMetrics().getServerCrashProcMetrics().getSubmittedCounter());
     LOG.info("Histo count", this.util.getHBaseCluster().getMaster().getMasterMetrics().getServerCrashProcMetrics().getTimeHisto());
+    MetricsMasterSource masterSource = this.util.getHBaseCluster().getMaster().getMasterMetrics().getMetricsSource();
+    metricsHelper.assertCounter(MetricsMasterSource.SERVER_CRASH_METRIC_PREFIX+"SubmittedCount",
+            4, masterSource);
+    metricsHelper.assertCounter(MetricsMasterSource.SERVER_CRASH_METRIC_PREFIX+"TimeHisto",
+            4, masterSource);
 
   }
 
