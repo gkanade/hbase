@@ -33,6 +33,7 @@ public class AtomicUtils {
   public static void updateMin(AtomicLong min, long value) {
     while (true) {
       long cur = min.get();
+      System.out.println("Cur is " + cur);
       if (value >= cur) {
         break;
       }
