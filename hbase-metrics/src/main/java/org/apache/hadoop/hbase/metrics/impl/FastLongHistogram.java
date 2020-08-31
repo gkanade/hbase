@@ -122,6 +122,10 @@ public class FastLongHistogram {
         // So silently throw it away.
         return;
       }
+      System.out.println("Adding to histogram value");
+      System.out.println(value);
+      System.out.println("Adding to histogram count");
+      System.out.println(count);
       AtomicUtils.updateMin(min, value);
       AtomicUtils.updateMax(max, value);
 
