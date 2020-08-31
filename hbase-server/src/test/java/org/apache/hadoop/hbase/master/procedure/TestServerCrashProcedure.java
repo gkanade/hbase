@@ -173,7 +173,7 @@ public class TestServerCrashProcedure {
     MetricsMasterSource masterSource = this.util.getHBaseCluster().getMaster().getMasterMetrics().getMetricsSource();
     /*metricsHelper.assertCounter(MetricsMasterSource.SERVER_CRASH_METRIC_PREFIX+"SubmittedCount",
             4, masterSource);*/
-    metricsHelper.assertCounter(MetricsMasterSource.SERVER_CRASH_METRIC_PREFIX+"Time_num_ops",
+    metricsHelper.assertCounter(MetricsMasterSource.SERVER_CRASH_METRIC_PREFIX+"Time_min",
             4, masterSource);
 
   }
