@@ -167,8 +167,8 @@ public class TestServerCrashProcedure {
       throw throwable;
     }
 
-    LOG.info("Submitted count", this.util.getHBaseCluster().getMaster().getMasterMetrics().getServerCrashProcMetrics().getSubmittedCounter().getCount());
-    LOG.info("Histo count", this.util.getHBaseCluster().getMaster().getMasterMetrics().getServerCrashProcMetrics().getTimeHisto().getCount());
+    LOG.info("Submitted count", this.util.getHBaseCluster().getMaster().getMasterMetrics().getServerCrashProcMetrics().getSubmittedCounter());
+    LOG.info("Histo count", this.util.getHBaseCluster().getMaster().getMasterMetrics().getServerCrashProcMetrics().getTimeHisto());
 
   }
 
