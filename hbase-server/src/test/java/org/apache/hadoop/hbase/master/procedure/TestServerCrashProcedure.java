@@ -86,11 +86,12 @@ public class TestServerCrashProcedure {
 
   @After
   public void tearDown() throws Exception {
-    collectMasterMetrics();
-    LOG.info("Submitted count", serverCrashSubmittedCount);
-    LOG.info("Histo count", serverCrashHistoCount);
+    //collectMasterMetrics();
     MiniHBaseCluster cluster = this.util.getHBaseCluster();
     HMaster master = cluster == null? null: cluster.getMaster();
+    LOG.info("Submitted count", master.getMasterMetrics().getServerCrashProcMetrics().getSubmittedCounter().getCount());
+    LOG.info("Histo count", master.getMasterMetrics().getServerCrashProcMetrics().getTimeHisto().getCount());
+
     if (master != null && master.getMasterProcedureExecutor() != null) {
       ProcedureTestingUtility.setKillAndToggleBeforeStoreUpdate(
         master.getMasterProcedureExecutor(), false);
