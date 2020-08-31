@@ -71,6 +71,7 @@ public class MutableHistogram extends MutableMetric implements MetricHistogram {
 
   protected static void updateSnapshotMetrics(String name, String desc, Histogram histogram,
       Snapshot snapshot, MetricsRecordBuilder metricsRecordBuilder) {
+    System.out.println("MutableHistogram: name " + name);
     metricsRecordBuilder.addCounter(Interns.info(name + NUM_OPS_METRIC_NAME, desc),
         histogram.getCount());
     metricsRecordBuilder.addGauge(Interns.info(name + MIN_METRIC_NAME, desc), snapshot.getMin());
