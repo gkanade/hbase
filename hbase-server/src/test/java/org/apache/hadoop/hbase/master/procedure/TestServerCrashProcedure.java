@@ -87,6 +87,7 @@ public class TestServerCrashProcedure {
   @After
   public void tearDown() throws Exception {
     collectMasterMetrics();
+    LOG.info("Submitted count", serverCrashSubmittedCount);
     LOG.info("Histo count", serverCrashHistoCount);
     MiniHBaseCluster cluster = this.util.getHBaseCluster();
     HMaster master = cluster == null? null: cluster.getMaster();
