@@ -69,7 +69,7 @@ public class MutableHistogram extends MutableMetric implements MetricHistogram {
     }
     if (snapshot != null) {
       if(name.equalsIgnoreCase("ServerCrash")) {
-        System.out.println("Got non null snapshot for ServerCrash");
+        System.out.println("Got non null snapshot for ServerCrash and min is " + snapshot.getMin() );
       }
       updateSnapshotMetrics(name, desc, histogram, snapshot, metricsRecordBuilder);
     }
