@@ -103,7 +103,7 @@ public class HBaseMetrics2HadoopMetricsAdapter {
       } else if (metric instanceof Counter) {
         addCounter(name, (Counter)metric, builder);
       } else if (metric instanceof Histogram) {
-        System.out.println("Adapter: Histogram " + name);
+        //System.out.println("Adapter: Histogram " + name);
         addHistogram(name, (Histogram)metric, builder);
       } else if (metric instanceof Meter) {
         addMeter(name, (Meter)metric, builder);
