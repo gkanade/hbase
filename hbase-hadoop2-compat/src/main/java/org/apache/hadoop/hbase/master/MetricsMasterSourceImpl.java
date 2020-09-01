@@ -24,6 +24,7 @@ import org.apache.hadoop.hbase.metrics.OperationMetrics;
 import org.apache.hadoop.metrics2.MetricsCollector;
 import org.apache.hadoop.metrics2.MetricsRecordBuilder;
 import org.apache.hadoop.metrics2.lib.MutableFastCounter;
+import org.apache.hadoop.metrics2.lib.MutableHistogram;
 import org.apache.yetus.audience.InterfaceAudience;
 
 /**
@@ -80,9 +81,10 @@ public class MetricsMasterSourceImpl
   public void getMetrics(MetricsCollector metricsCollector, boolean all) {
 
     MetricsRecordBuilder metricsRecordBuilder = metricsCollector.addRecord(metricsName);
+    MutableHistogram.snapshot("ServerCrash", "", getServerCrashMetrics().getTimeHisto(), metricsRecordBuilder, true);
 
     // masterWrapper can be null because this function is called inside of init.
-    if (masterWrapper != null) {
+    /*if (masterWrapper != null) {
       metricsRecordBuilder
           .addGauge(Interns.info(MERGE_PLAN_COUNT_NAME, MERGE_PLAN_COUNT_DESC),
               masterWrapper.getMergePlanCount())
@@ -117,9 +119,8 @@ public class MetricsMasterSourceImpl
 
     metricsRegistry.snapshot(metricsRecordBuilder, all);
     if(metricsAdapter != null) {
-      //metricsAdapter.snapshotAllMetrics(registry, metricsRecordBuilder);
-      getServerCrashMetrics().getTimeHisto().snapshot();
-    }
+      metricsAdapter.snapshotAllMetrics(registry, metricsRecordBuilder);
+    }*/
   }
 
   @Override
