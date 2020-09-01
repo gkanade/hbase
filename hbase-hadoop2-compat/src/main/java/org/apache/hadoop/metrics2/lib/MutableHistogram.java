@@ -81,7 +81,9 @@ public class MutableHistogram extends MutableMetric implements MetricHistogram {
     metricsRecordBuilder.addCounter(Interns.info(name + NUM_OPS_METRIC_NAME, desc),
         histogram.getCount());
     metricsRecordBuilder.addGauge(Interns.info(name + MIN_METRIC_NAME, desc), snapshot.getMin());
-    //System.out.println("MutableHistogram: name " + name + "_min " + snapshot.getMin());
+    if(name.equalsIgnoreCase("ServerCrash")) {
+      System.out.println("MutableHistogram: name " + name + "_min " + snapshot.getMin());
+    }
     metricsRecordBuilder.addGauge(Interns.info(name + MAX_METRIC_NAME, desc), snapshot.getMax());
     metricsRecordBuilder.addGauge(Interns.info(name + MEAN_METRIC_NAME, desc), snapshot.getMean());
 

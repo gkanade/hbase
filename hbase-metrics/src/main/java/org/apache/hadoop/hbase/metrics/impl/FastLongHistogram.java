@@ -224,7 +224,7 @@ public class FastLongHistogram {
 
     public long getMin() {
       long min = this.min.get();
-      System.out.println("Getting min" + min);
+      //System.out.println("Getting min" + min);
       return min == Long.MAX_VALUE ? 0 : min; // in case it is not initialized
     }
 
