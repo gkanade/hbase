@@ -81,7 +81,7 @@ public class MetricsMasterSourceImpl
   public void getMetrics(MetricsCollector metricsCollector, boolean all) {
 
     MetricsRecordBuilder metricsRecordBuilder = metricsCollector.addRecord(metricsName);
-    MutableHistogram.snapshot("ServerCrashTime", "", getServerCrashMetrics().getTimeHisto(), metricsRecordBuilder, true);
+    MutableHistogram.snapshot("ServerCrashTime", "", this.getServerCrashMetrics().getTimeHisto(), metricsRecordBuilder, true);
 
     // masterWrapper can be null because this function is called inside of init.
     /*if (masterWrapper != null) {
