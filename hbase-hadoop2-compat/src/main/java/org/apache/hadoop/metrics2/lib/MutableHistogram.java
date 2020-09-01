@@ -64,11 +64,11 @@ public class MutableHistogram extends MutableMetric implements MetricHistogram {
                               MetricsRecordBuilder metricsRecordBuilder, boolean all) {
     // Get a reference to the old histogram.
     Snapshot snapshot = histogram.snapshot();
-    if(name.equalsIgnoreCase("ServerCrash")) {
+    if(name.equalsIgnoreCase("ServerCrashTime")) {
       System.out.println("Here");
     }
     if (snapshot != null) {
-      if(name.equalsIgnoreCase("ServerCrash")) {
+      if(name.equalsIgnoreCase("ServerCrashTime")) {
         System.out.println("Got non null snapshot for ServerCrash and min is " + snapshot.getMin() );
       }
       updateSnapshotMetrics(name, desc, histogram, snapshot, metricsRecordBuilder);
@@ -81,7 +81,7 @@ public class MutableHistogram extends MutableMetric implements MetricHistogram {
     metricsRecordBuilder.addCounter(Interns.info(name + NUM_OPS_METRIC_NAME, desc),
         histogram.getCount());
     metricsRecordBuilder.addGauge(Interns.info(name + MIN_METRIC_NAME, desc), snapshot.getMin());
-    if(name.equalsIgnoreCase("ServerCrash")) {
+    if(name.equalsIgnoreCase("ServerCrashTime")) {
       System.out.println("MutableHistogram: name " + name + "_min " + snapshot.getMin());
     }
     metricsRecordBuilder.addGauge(Interns.info(name + MAX_METRIC_NAME, desc), snapshot.getMax());
