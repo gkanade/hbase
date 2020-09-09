@@ -109,6 +109,7 @@ public class MetricsAssertHelperImpl implements MetricsAssertHelper {
 
     @Override
     public MetricsRecordBuilder addGauge(MetricsInfo metricsInfo, long l) {
+      System.out.println("Adding gauge " + metricsInfo.name() + " " + l);
       gauges.put(canonicalizeMetricName(metricsInfo.name()), Long.valueOf(l));
       return this;
     }
