@@ -81,10 +81,10 @@ public class MetricsMasterSourceImpl
   public void getMetrics(MetricsCollector metricsCollector, boolean all) {
 
     MetricsRecordBuilder metricsRecordBuilder = metricsCollector.addRecord(metricsName);
-    MutableHistogram.snapshot("ServerCrashTime", "", this.getServerCrashMetrics().getTimeHisto(), metricsRecordBuilder, true);
+    //MutableHistogram.snapshot("ServerCrashTime", "", this.getServerCrashMetrics().getTimeHisto(), metricsRecordBuilder, true);
 
     // masterWrapper can be null because this function is called inside of init.
-    /*if (masterWrapper != null) {
+    if (masterWrapper != null) {
       metricsRecordBuilder
           .addGauge(Interns.info(MERGE_PLAN_COUNT_NAME, MERGE_PLAN_COUNT_DESC),
               masterWrapper.getMergePlanCount())
@@ -119,8 +119,9 @@ public class MetricsMasterSourceImpl
 
     metricsRegistry.snapshot(metricsRecordBuilder, all);
     if(metricsAdapter != null) {
+      System.out.println("Asserting metricsAdapter not null in MetricsMasterSourceImpl");
       metricsAdapter.snapshotAllMetrics(registry, metricsRecordBuilder);
-    }*/
+    }
   }
 
   @Override
