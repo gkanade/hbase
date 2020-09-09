@@ -23,6 +23,7 @@ import org.apache.hadoop.hbase.metrics.Interns;
 import org.apache.hadoop.hbase.metrics.OperationMetrics;
 import org.apache.hadoop.metrics2.MetricsCollector;
 import org.apache.hadoop.metrics2.MetricsRecordBuilder;
+import org.apache.hadoop.metrics2.lib.MetricsRegistry;
 import org.apache.hadoop.metrics2.lib.MutableFastCounter;
 import org.apache.hadoop.metrics2.lib.MutableHistogram;
 import org.apache.yetus.audience.InterfaceAudience;
@@ -119,8 +120,8 @@ public class MetricsMasterSourceImpl
 
     metricsRegistry.snapshot(metricsRecordBuilder, all);
     if(metricsAdapter != null) {
-      metricsAdapter.snapshotAllMetrics(registry, metricsRecordBuilder);
-      getServerCrashMetrics().getTimeHisto().snapshot();
+      //metricsAdapter.snapshotAllMetrics(registry, metricsRecordBuilder);
+      metricsRecordBuilder.addGauge(Interns.info(SERVER_CRASH_METRIC_PREFIX+"_min", "desc"), getServerCrashMetrics().getTimeHisto().snapshot().getMin());
     }
   }
 
