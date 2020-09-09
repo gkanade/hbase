@@ -171,9 +171,9 @@ public class TestServerCrashProcedure {
     LOG.info("Submitted count" + this.util.getHBaseCluster().getMaster().getMasterMetrics().getServerCrashProcMetrics().getSubmittedCounter().getCount());
     LOG.info("Histo count"+ this.util.getHBaseCluster().getMaster().getMasterMetrics().getServerCrashProcMetrics().getTimeHisto().getCount());
     MetricsMasterSource masterSource = this.util.getHBaseCluster().getMaster().getMasterMetrics().getMetricsSource();
-    LOG.info("Histo min " + masterSource.getServerCrashMetrics().getTimeHisto().snapshot().getMin());
+    //LOG.info("Histo min " + masterSource.getServerCrashMetrics().getTimeHisto().snapshot().getMin());
 
-    LOG.info("Histo max " + masterSource.getServerCrashMetrics().getTimeHisto().snapshot().getMax());
+    //LOG.info("Histo max " + masterSource.getServerCrashMetrics().getTimeHisto().snapshot().getMax());
     /*metricsHelper.assertCounter(MetricsMasterSource.SERVER_CRASH_METRIC_PREFIX+"SubmittedCount",
             4, masterSource);*/
     metricsHelper.assertGauge(MetricsMasterSource.SERVER_CRASH_METRIC_PREFIX+"Time_min",
