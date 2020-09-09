@@ -119,8 +119,8 @@ public class MetricsMasterSourceImpl
 
     metricsRegistry.snapshot(metricsRecordBuilder, all);
     if(metricsAdapter != null) {
-      System.out.println("Asserting metricsAdapter not null in MetricsMasterSourceImpl");
       metricsAdapter.snapshotAllMetrics(registry, metricsRecordBuilder);
+      getServerCrashMetrics().getTimeHisto().snapshot();
     }
   }
 
