@@ -121,7 +121,7 @@ public class MetricsMasterSourceImpl
     metricsRegistry.snapshot(metricsRecordBuilder, all);
     if(metricsAdapter != null) {
       //metricsAdapter.snapshotAllMetrics(registry, metricsRecordBuilder);
-      metricsRecordBuilder.addGauge(Interns.info(SERVER_CRASH_METRIC_PREFIX+"_min", "desc"), getServerCrashMetrics().getTimeHisto().snapshot().getMin());
+      metricsRecordBuilder.addGauge(Interns.info(SERVER_CRASH_METRIC_PREFIX+"Time_min", "desc"), getServerCrashMetrics().getTimeHisto().snapshot().getMin());
     }
   }
 
