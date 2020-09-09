@@ -256,6 +256,7 @@ public class MetricsAssertHelperImpl implements MetricsAssertHelper {
   }
 
   private String canonicalizeMetricName(String in) {
+    System.out.println("MetricsAssertHelperImpl In Deep in is " + in);
     return in.toLowerCase(Locale.ROOT).replaceAll("[^A-Za-z0-9 ]", "");
   }
 }
