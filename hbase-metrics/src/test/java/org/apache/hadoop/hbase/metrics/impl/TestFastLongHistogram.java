@@ -134,4 +134,15 @@ public class TestFastLongHistogram {
     hist.snapshotAndReset();
     doTestUniform(hist);
   }
+
+  @Test
+  public void testCrazy() {
+    FastLongHistogram hist = new FastLongHistogram();
+    hist.add(20000, 1);
+    assertEquals(20000, hist.getMin());
+    hist.add(10000, 1);
+    assertEquals(10000, hist.getMin());
+    hist.snapshotAndReset();
+    assertEquals(10000, hist.getMin());
+  }
 }
