@@ -84,6 +84,7 @@ public class FastLongHistogram {
       long wd = values[1] - values[0] + 1;
       // expand minQ and maxQ in two ends back assuming uniform distribution
       this.binsMin = Math.max(0L, (long) (values[0] - wd * minQ));
+      System.out.println("During binsMin is " + binsMin);
       long binsMax = (long) (values[1] + wd * (1 - maxQ)) + 1;
       // make sure each of bins is at least of width 1
       this.binsMax = Math.max(binsMax, this.binsMin + numBins);
@@ -319,7 +320,9 @@ public class FastLongHistogram {
    */
   public Snapshot snapshotAndReset() {
     final Bins oldBins = this.bins;
+    System.out.println("Initially min is " + oldBins.getMin());
     this.bins = new Bins(this.bins, this.bins.counts.length - 3, 0.01, 0.99);
+    System.out.println("After old bins min is " + oldBins.getMin());
     final long[] percentiles = oldBins.getQuantiles(DEFAULT_QUANTILES);
     final long count = oldBins.count.sum();
 
