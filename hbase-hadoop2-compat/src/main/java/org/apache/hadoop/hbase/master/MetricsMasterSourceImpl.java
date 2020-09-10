@@ -118,12 +118,12 @@ public class MetricsMasterSourceImpl
               String.valueOf(masterWrapper.getIsActiveMaster()));
     }
 
-    //metricsRegistry.snapshot(metricsRecordBuilder, all);
+    metricsRegistry.snapshot(metricsRecordBuilder, all);
     if(metricsAdapter != null) {
-      //metricsAdapter.snapshotAllMetrics(registry, metricsRecordBuilder);
-      long min = getServerCrashMetrics().getTimeHisto().snapshot().getMin();
-      System.out.println("MetricsMasterSourceImpl adding gauge " + min);
-      metricsRecordBuilder.addGauge(Interns.info(SERVER_CRASH_METRIC_PREFIX+"Time_min", "desc"), min);
+      metricsAdapter.snapshotAllMetrics(registry, metricsRecordBuilder);
+      //long min = getServerCrashMetrics().getTimeHisto().snapshot().getMin();
+      //System.out.println("MetricsMasterSourceImpl adding gauge " + min);
+      //metricsRecordBuilder.addGauge(Interns.info(SERVER_CRASH_METRIC_PREFIX+"Time_min", "desc"), min);
     }
   }
 
