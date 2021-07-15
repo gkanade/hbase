@@ -290,7 +290,7 @@ public class HFilePrettyPrinter extends Configured implements Tool {
 
     if (checkRootDir) {
       Path rootPath = CommonFSUtils.getRootDir(getConf());
-      String rootString = rootPath + rootPath.SEPARATOR;
+      String rootString = rootPath + Path.SEPARATOR;
       if (!file.toString().startsWith(rootString)) {
         // First we see if fully-qualified URI matches the root dir. It might
         // also be an absolute path in the same filesystem, so we prepend the FS
@@ -321,16 +321,16 @@ public class HFilePrettyPrinter extends Configured implements Tool {
       // scan over file and read key/value's and check if requested
       HFileScanner scanner = reader.getScanner(false, false, false);
       fileStats = new KeyValueStatsCollector();
-      boolean shouldScanKeysValues = false;
-      if (this.isSeekToRow) {
+      boolean shouldScanKeysValues;
+      if (this.isSeekToRow && !Bytes.equals(row, reader.getFirstRowKey().orElse(null))) {
         // seek to the first kv on this row
-        shouldScanKeysValues =
-          (scanner.seekTo(PrivateCellUtil.createFirstOnRow(this.row)) != -1);
+        shouldScanKeysValues = (scanner.seekTo(PrivateCellUtil.createFirstOnRow(this.row)) != -1);
       } else {
         shouldScanKeysValues = scanner.seekTo();
       }
-      if (shouldScanKeysValues)
+      if (shouldScanKeysValues) {
         scanKeysValues(file, fileStats, scanner, row);
+      }
     }
 
     // print meta data

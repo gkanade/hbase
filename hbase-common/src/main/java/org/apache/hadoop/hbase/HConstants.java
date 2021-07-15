@@ -1574,6 +1574,13 @@ public final class HConstants {
       "hbase.master.executor.serverops.threads";
   public static final int MASTER_SERVER_OPERATIONS_THREADS_DEFAULT = 5;
 
+  /**
+   * Number of threads used to dispatch merge operations to the regionservers.
+   */
+  public static final String MASTER_MERGE_DISPATCH_THREADS =
+      "hbase.master.executor.merge.dispatch.threads";
+  public static final int MASTER_MERGE_DISPATCH_THREADS_DEFAULT = 2;
+
   public static final String MASTER_META_SERVER_OPERATIONS_THREADS =
       "hbase.master.executor.meta.serverops.threads";
   public static final int MASTER_META_SERVER_OPERATIONS_THREADS_DEFAULT = 5;
@@ -1597,6 +1604,16 @@ public final class HConstants {
   public static final String SLOW_LOG_SYS_TABLE_ENABLED_KEY =
     "hbase.regionserver.slowlog.systable.enabled";
   public static final boolean DEFAULT_SLOW_LOG_SYS_TABLE_ENABLED_KEY = false;
+
+  /**
+   * Number of rows in a batch operation above which a warning will be logged.
+   */
+  public static final String BATCH_ROWS_THRESHOLD_NAME = "hbase.rpc.rows.warning.threshold";
+
+  /**
+   * Default value of {@link #BATCH_ROWS_THRESHOLD_NAME}
+   */
+  public static final int BATCH_ROWS_THRESHOLD_DEFAULT = 5000;
 
   private HConstants() {
     // Can't be instantiated with this ctor.

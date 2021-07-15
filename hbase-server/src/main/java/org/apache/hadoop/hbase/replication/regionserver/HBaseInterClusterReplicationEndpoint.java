@@ -128,6 +128,8 @@ public class HBaseInterClusterReplicationEndpoint extends HBaseReplicationEndpoi
   private boolean dropOnDeletedTables;
   private boolean dropOnDeletedColumnFamilies;
   private boolean isSerial = false;
+  //Initialising as 0 to guarantee at least one logging message
+  private long lastSinkFetchTime = 0;
 
   /*
    * Some implementations of HBaseInterClusterReplicationEndpoint may require instantiating
@@ -236,7 +238,7 @@ public class HBaseInterClusterReplicationEndpoint extends HBaseReplicationEndpoi
    * @param sleepMultiplier by how many times the default sleeping time is augmented
    * @return True if <code>sleepMultiplier</code> is &lt; <code>maxRetriesMultiplier</code>
    */
-  protected boolean sleepForRetries(String msg, int sleepMultiplier) {
+  private boolean sleepForRetries(String msg, int sleepMultiplier) {
     try {
       if (LOG.isTraceEnabled()) {
         LOG.trace("{} {}, sleeping {} times {}",
@@ -244,8 +246,9 @@ public class HBaseInterClusterReplicationEndpoint extends HBaseReplicationEndpoi
       }
       Thread.sleep(this.sleepForRetries * sleepMultiplier);
     } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
       if (LOG.isDebugEnabled()) {
-        LOG.debug("{} Interrupted while sleeping between retries", logPeerId());
+        LOG.debug("{} {} Interrupted while sleeping between retries", msg, logPeerId());
       }
     }
     return sleepMultiplier < maxRetriesMultiplier;
@@ -518,8 +521,14 @@ public class HBaseInterClusterReplicationEndpoint extends HBaseReplicationEndpoi
 
     int numSinks = replicationSinkMgr.getNumSinks();
     if (numSinks == 0) {
-      LOG.warn("{} No replication sinks found, returning without replicating. "
-        + "The source should retry with the same set of edits.", logPeerId());
+      if((System.currentTimeMillis() - lastSinkFetchTime) >= (maxRetriesMultiplier*1000)) {
+        LOG.warn(
+          "No replication sinks found, returning without replicating. "
+            + "The source should retry with the same set of edits. Not logging this again for "
+            + "the next {} seconds.", maxRetriesMultiplier);
+        lastSinkFetchTime = System.currentTimeMillis();
+      }
+      sleepForRetries("No sinks available at peer", sleepMultiplier);
       return false;
     }
 
@@ -551,10 +560,14 @@ public class HBaseInterClusterReplicationEndpoint extends HBaseReplicationEndpoi
           } else if (dropOnDeletedColumnFamilies && isNoSuchColumnFamilyException(ioe)) {
             batches = filterNotExistColumnFamilyEdits(batches);
             if (batches.isEmpty()) {
-              LOG.warn(
-                  "After filter not exist column family's edits, 0 edits to replicate, just return");
+              LOG.warn("After filter not exist column family's edits, 0 edits to replicate, "
+                      + "just return");
               return true;
             }
+          } else {
+            LOG.warn("{} Peer encountered RemoteException, rechecking all sinks: ", logPeerId(),
+                ioe);
+            replicationSinkMgr.chooseSinks();
           }
         } else {
           if (ioe instanceof SocketTimeoutException) {

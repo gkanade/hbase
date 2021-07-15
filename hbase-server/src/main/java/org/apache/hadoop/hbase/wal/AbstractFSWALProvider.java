@@ -21,11 +21,13 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -45,7 +47,6 @@ import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
 import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
 import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 
@@ -257,27 +258,36 @@ public abstract class AbstractFSWALProvider<T extends AbstractFSWAL<?>> implemen
   public static final String SPLITTING_EXT = "-splitting";
 
   /**
-   * It returns the file create timestamp from the file name. For name format see
+   * Pattern used to validate a WAL file name see {@link #validateWALFilename(String)} for
+   * description.
+   */
+  private static final Pattern WAL_FILE_NAME_PATTERN =
+    Pattern.compile("(.+)\\.(\\d+)(\\.[0-9A-Za-z]+)?");
+
+  /**
+   * Define for when no timestamp found.
+   */
+  private static final long NO_TIMESTAMP = -1L;
+
+  /**
+   * It returns the file create timestamp (the 'FileNum') from the file name. For name format see
    * {@link #validateWALFilename(String)} public until remaining tests move to o.a.h.h.wal
    * @param wal must not be null
    * @return the file number that is part of the WAL file name
    */
   @VisibleForTesting
   public static long extractFileNumFromWAL(final WAL wal) {
-    final Path walName = ((AbstractFSWAL<?>) wal).getCurrentFileName();
-    if (walName == null) {
+    final Path walPath = ((AbstractFSWAL<?>) wal).getCurrentFileName();
+    if (walPath == null) {
       throw new IllegalArgumentException("The WAL path couldn't be null");
     }
-    final String[] walPathStrs = walName.toString().split("\\" + WAL_FILE_NAME_DELIMITER);
-    return Long.parseLong(walPathStrs[walPathStrs.length - (isMetaFile(walName) ? 2 : 1)]);
+    String name = walPath.getName();
+    long timestamp = getTimestamp(name);
+    if (timestamp == NO_TIMESTAMP) {
+      throw new IllegalArgumentException(name + " is not a valid wal file name");
+    }
+    return timestamp;
   }
-
-  /**
-   * Pattern used to validate a WAL file name see {@link #validateWALFilename(String)} for
-   * description.
-   */
-  private static final Pattern pattern =
-    Pattern.compile(".*\\.\\d*(" + META_WAL_PROVIDER_ID + ")*");
 
   /**
    * A WAL file name is of the format: &lt;wal-name&gt;{@link #WAL_FILE_NAME_DELIMITER}
@@ -287,7 +297,24 @@ public abstract class AbstractFSWALProvider<T extends AbstractFSWAL<?>> implemen
    * @return <tt>true</tt> if the filename matches an WAL, <tt>false</tt> otherwise
    */
   public static boolean validateWALFilename(String filename) {
-    return pattern.matcher(filename).matches();
+    return WAL_FILE_NAME_PATTERN.matcher(filename).matches();
+  }
+
+  /**
+   * Split a WAL filename to get a start time. WALs usually have the time we start writing to them
+   * with as part of their name, usually the suffix. Sometimes there will be an extra suffix as when
+   * it is a WAL for the meta table. For example, WALs might look like this
+   * <code>10.20.20.171%3A60020.1277499063250</code> where <code>1277499063250</code> is the
+   * timestamp. Could also be a meta WAL which adds a '.meta' suffix or a
+   * synchronous replication WAL which adds a '.syncrep' suffix. Check for these. File also may have
+   * no timestamp on it. For example the recovered.edits files are WALs but are named in ascending
+   * order. Here is an example: 0000000000000016310. Allow for this.
+   * @param name Name of the WAL file.
+   * @return Timestamp or {@link #NO_TIMESTAMP}.
+   */
+  public static long getTimestamp(String name) {
+    Matcher matcher = WAL_FILE_NAME_PATTERN.matcher(name);
+    return matcher.matches() ? Long.parseLong(matcher.group(2)): NO_TIMESTAMP;
   }
 
   /**
@@ -415,11 +442,33 @@ public abstract class AbstractFSWALProvider<T extends AbstractFSWAL<?>> implemen
   }
 
   public static boolean isMetaFile(String p) {
-    if (p != null && p.endsWith(META_WAL_PROVIDER_ID)) {
-      return true;
-    }
-    return false;
+    return p != null && p.endsWith(META_WAL_PROVIDER_ID);
   }
+
+  /**
+   * Comparator used to compare WAL files together based on their start time.
+   * Just compares start times and nothing else.
+   */
+  public static class WALStartTimeComparator implements Comparator<Path> {
+    @Override
+    public int compare(Path o1, Path o2) {
+      return Long.compare(getTS(o1), getTS(o2));
+    }
+
+    /**
+     * Split a path to get the start time
+     * For example: 10.20.20.171%3A60020.1277499063250
+     * Could also be a meta WAL which adds a '.meta' suffix or a synchronous replication WAL
+     * which adds a '.syncrep' suffix. Check.
+     * @param p path to split
+     * @return start time
+     */
+    private static long getTS(Path p) {
+      return getTimestamp(p.getName());
+    }
+  }
+
+
 
   public static boolean isArchivedLogFile(Path p) {
     String oldLog = Path.SEPARATOR + HConstants.HREGION_OLDLOGDIR_NAME + Path.SEPARATOR;
@@ -461,12 +510,9 @@ public abstract class AbstractFSWALProvider<T extends AbstractFSWAL<?>> implemen
    * @param path path to WAL file
    * @param conf configuration
    * @return WAL Reader instance
-   * @throws IOException
    */
   public static org.apache.hadoop.hbase.wal.WAL.Reader openReader(Path path, Configuration conf)
-      throws IOException
-
-  {
+      throws IOException {
     long retryInterval = 2000; // 2 sec
     int maxAttempts = 30;
     int attempt = 0;

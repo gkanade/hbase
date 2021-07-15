@@ -82,7 +82,6 @@ import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellBuilderType;
 import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellComparatorImpl;
-import org.apache.hadoop.hbase.CellComparatorImpl.MetaCellComparator;
 import org.apache.hadoop.hbase.CellScanner;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.CompareOperator;
@@ -94,6 +93,7 @@ import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HConstants.OperationStatusCode;
 import org.apache.hadoop.hbase.HDFSBlocksDistribution;
 import org.apache.hadoop.hbase.KeyValue;
+import org.apache.hadoop.hbase.MetaCellComparator;
 import org.apache.hadoop.hbase.NamespaceDescriptor;
 import org.apache.hadoop.hbase.NotServingRegionException;
 import org.apache.hadoop.hbase.PrivateCellUtil;
@@ -778,8 +778,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     this.conf = new CompoundConfiguration().add(confParam).addBytesMap(htd.getValues());
     this.cellComparator = htd.isMetaTable() ||
       conf.getBoolean(USE_META_CELL_COMPARATOR, DEFAULT_USE_META_CELL_COMPARATOR) ?
-        CellComparatorImpl.META_COMPARATOR :
-        CellComparatorImpl.COMPARATOR;
+        MetaCellComparator.META_COMPARATOR : CellComparatorImpl.COMPARATOR;
     this.lock = new ReentrantReadWriteLock(conf.getBoolean(FAIR_REENTRANT_CLOSE_LOCK,
         DEFAULT_FAIR_REENTRANT_CLOSE_LOCK));
     this.flushCheckInterval = conf.getInt(MEMSTORE_PERIODIC_FLUSH_INTERVAL,
@@ -789,8 +788,14 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       throw new IllegalArgumentException(MEMSTORE_FLUSH_PER_CHANGES + " can not exceed "
           + MAX_FLUSH_PER_CHANGES);
     }
-    this.rowLockWaitDuration = conf.getInt("hbase.rowlock.wait.duration",
-                    DEFAULT_ROWLOCK_WAIT_DURATION);
+    int tmpRowLockDuration = conf.getInt("hbase.rowlock.wait.duration",
+        DEFAULT_ROWLOCK_WAIT_DURATION);
+    if (tmpRowLockDuration <= 0) {
+      LOG.info("Found hbase.rowlock.wait.duration set to {}. values <= 0 will cause all row " +
+          "locking to fail. Treating it as 1ms to avoid region failure.", tmpRowLockDuration);
+      tmpRowLockDuration = 1;
+    }
+    this.rowLockWaitDuration = tmpRowLockDuration;
 
     this.isLoadingCfsOnDemandDefault = conf.getBoolean(LOAD_CFS_ON_DEMAND_CONFIG_KEY, true);
     this.htableDescriptor = htd;
@@ -2302,7 +2307,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     } finally {
       if (requestNeedsCancellation) store.cancelRequestedCompaction(compaction);
       if (status != null) {
-        LOG.debug("Compaction status journal for {}:\n\t{}", this.getRegionInfo().getEncodedName(),
+        LOG.debug("Compaction status journal for {}:\n{}", this.getRegionInfo().getEncodedName(),
           status.prettyPrintJournal());
         status.cleanup();
       }
@@ -2450,7 +2455,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       }
     } finally {
       lock.readLock().unlock();
-      LOG.debug("Flush status journal for {}:\n\t{}", this.getRegionInfo().getEncodedName(),
+      LOG.debug("Flush status journal for {}:\n{}", this.getRegionInfo().getEncodedName(),
         status.prettyPrintJournal());
       status.cleanup();
     }
@@ -2917,7 +2922,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
     // If we get to here, the HStores have been written.
     if (wal != null) {
-      wal.completeCacheFlush(this.getRegionInfo().getEncodedNameAsBytes());
+      wal.completeCacheFlush(this.getRegionInfo().getEncodedNameAsBytes(), flushedSeqId);
     }
 
     // Record latest flush time
@@ -4520,12 +4525,17 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       requestFlush();
       // Don't print current limit because it will vary too much. The message is used as a key
       // over in RetriesExhaustedWithDetailsException processing.
-      throw new RegionTooBusyException("Over memstore limit=" +
-        org.apache.hadoop.hbase.procedure2.util.StringUtils.humanSize(this.blockingMemStoreSize) +
-        ", regionName=" +
-          (this.getRegionInfo() == null? "unknown": this.getRegionInfo().getEncodedName()) +
-          ", server=" + (this.getRegionServerServices() == null? "unknown":
-              this.getRegionServerServices().getServerName()));
+      final String regionName =
+        this.getRegionInfo() == null ? "unknown" : this.getRegionInfo().getEncodedName();
+      final String serverName = this.getRegionServerServices() == null ?
+        "unknown" : (this.getRegionServerServices().getServerName() == null ? "unknown" :
+          this.getRegionServerServices().getServerName().toString());
+      RegionTooBusyException rtbe = new RegionTooBusyException(
+        "Over memstore limit=" + org.apache.hadoop.hbase.procedure2.util.StringUtils
+          .humanSize(this.blockingMemStoreSize) + ", regionName=" + regionName + ", server="
+          + serverName);
+      LOG.warn("Region is too busy due to exceeding memstore size limit.", rtbe);
+      throw rtbe;
     }
   }
 
@@ -6722,14 +6732,9 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         outResults.addAll(tmpList);
       }
 
-      if (!outResults.isEmpty()) {
-        readRequestsCount.increment();
-        if (metricsRegion != null) {
-          metricsRegion.updateReadRequestCount();
-        }
-      }
-      if (rsServices != null && rsServices.getMetrics() != null) {
-        rsServices.getMetrics().updateReadQueryMeter(getRegionInfo().getTable());
+      readRequestsCount.increment();
+      if (metricsRegion != null) {
+        metricsRegion.updateReadRequestCount();
       }
 
       // If the size limit was reached it means a partial Result is being returned. Returning a
@@ -7496,11 +7501,18 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         RegionReplicaUtil.isDefaultReplica(getRegionInfo())) {
         writeRegionOpenMarker(wal, openSeqNum);
       }
-    }catch(Throwable t){
+    } catch (Throwable t) {
       // By coprocessor path wrong region will open failed,
       // MetricsRegionWrapperImpl is already init and not close,
       // add region close when open failed
-      this.close();
+      try {
+        // It is not required to write sequence id file when region open is failed.
+        // Passing true to skip the sequence id file write.
+        this.close(true);
+      } catch (Throwable e) {
+        LOG.warn("Open region: {} failed. Try close region but got exception ", this.getRegionInfo(),
+          e);
+      }
       throw t;
     }
     return this;
@@ -7659,6 +7671,9 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   void metricsUpdateForGet(List<Cell> results, long before) {
     if (this.metricsRegion != null) {
       this.metricsRegion.updateGet(EnvironmentEdgeManager.currentTime() - before);
+    }
+    if (rsServices != null && this.rsServices.getMetrics() != null) {
+      rsServices.getMetrics().updateReadQueryMeter(getTableDescriptor().getTableName(), 1);
     }
   }
 
@@ -8696,11 +8711,15 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       if (!lock.tryLock(waitTime, TimeUnit.MILLISECONDS)) {
         // Don't print millis. Message is used as a key over in
         // RetriesExhaustedWithDetailsException processing.
-        throw new RegionTooBusyException("Failed to obtain lock; regionName=" +
-            (this.getRegionInfo() == null? "unknown":
-                this.getRegionInfo().getRegionNameAsString()) +
-            ", server=" + (this.getRegionServerServices() == null? "unknown":
-                this.getRegionServerServices().getServerName()));
+        final String regionName =
+          this.getRegionInfo() == null ? "unknown" : this.getRegionInfo().getRegionNameAsString();
+        final String serverName = this.getRegionServerServices() == null ?
+          "unknown" : (this.getRegionServerServices().getServerName() == null ?
+            "unknown" : this.getRegionServerServices().getServerName().toString());
+        RegionTooBusyException rtbe = new RegionTooBusyException(
+          "Failed to obtain lock; regionName=" + regionName + ", server=" + serverName);
+        LOG.warn("Region is too busy to allow lock acquisition.", rtbe);
+        throw rtbe;
       }
     } catch (InterruptedException ie) {
       LOG.info("Interrupted while waiting for a lock in region {}", this);

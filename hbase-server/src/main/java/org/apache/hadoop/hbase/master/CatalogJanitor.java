@@ -160,23 +160,22 @@ public class CatalogJanitor extends ScheduledChore {
    * Run janitorial scan of catalog <code>hbase:meta</code> table looking for
    * garbage to collect.
    * @return How many items gc'd whether for merge or split.
+   *   Returns -1 if previous scan is in progress.
    */
-  int scan() throws IOException {
+  @VisibleForTesting
+  public int scan() throws IOException {
     int gcs = 0;
     try {
       if (!alreadyRunning.compareAndSet(false, true)) {
         LOG.debug("CatalogJanitor already running");
-        return gcs;
+        // -1 indicates previous scan is in progress
+        return -1;
       }
       this.lastReport = scanForReport();
       if (!this.lastReport.isEmpty()) {
         LOG.warn(this.lastReport.toString());
       }
 
-      if (isRIT(this.services.getAssignmentManager())) {
-        LOG.warn("Playing-it-safe skipping merge/split gc'ing of regions from hbase:meta while " +
-            "regions-in-transition (RIT)");
-      }
       Map<RegionInfo, Result> mergedRegions = this.lastReport.mergedRegions;
       for (Map.Entry<RegionInfo, Result> e : mergedRegions.entrySet()) {
         if (this.services.isInMaintenanceMode()) {
@@ -412,26 +411,6 @@ public class CatalogJanitor extends ScheduledChore {
   }
 
   /**
-   * Checks if the specified region has merge qualifiers, if so, try to clean them.
-   * @return true if no info:merge* columns; i.e. the specified region doesn't have
-   *   any merge qualifiers.
-   */
-  public boolean cleanMergeQualifier(final RegionInfo region) throws IOException {
-    // Get merge regions if it is a merged region and already has merge qualifier
-    List<RegionInfo> parents = MetaTableAccessor.getMergeRegions(this.services.getConnection(),
-        region.getRegionName());
-    if (parents == null || parents.isEmpty()) {
-      // It doesn't have merge qualifier, no need to clean
-      return true;
-    }
-
-    // If a parent region is a merged child region and GC has not kicked in/finish its work yet,
-    // return false in this case to avoid kicking in a merge, trying later.
-    cleanMergeRegion(region, parents);
-    return false;
-  }
-
-  /**
    * Report made by ReportMakingVisitor
    */
   public static class Report {
@@ -642,12 +621,17 @@ public class CatalogJanitor extends ScheduledChore {
       // If table is disabled, skip integrity check.
       if (!isTableDisabled(ri)) {
         if (isTableTransition(ri)) {
-          // On table transition, look to see if last region was last in table
-          // and if this is the first. Report 'hole' if neither is true.
           // HBCK1 used to have a special category for missing start or end keys.
           // We'll just lump them in as 'holes'.
-          if ((this.previous != null && !this.previous.isLast()) || !ri.isFirst()) {
-            addHole(this.previous == null? RegionInfo.UNDEFINED: this.previous, ri);
+
+          // This is a table transition. If this region is not first region, report a hole.
+          if (!ri.isFirst()) {
+            addHole(RegionInfo.UNDEFINED, ri);
+          }
+          // This is a table transition. If last region was not last region of previous table,
+          // report a hole
+          if (this.previous != null && !this.previous.isLast()) {
+            addHole(this.previous, RegionInfo.UNDEFINED);
           }
         } else {
           if (!this.previous.isNext(ri)) {
@@ -785,9 +769,8 @@ public class CatalogJanitor extends ScheduledChore {
 
   private static void checkLog4jProperties() {
     String filename = "log4j.properties";
-    try {
-      final InputStream inStream =
-          CatalogJanitor.class.getClassLoader().getResourceAsStream(filename);
+    try (final InputStream inStream =
+      CatalogJanitor.class.getClassLoader().getResourceAsStream(filename)) {
       if (inStream != null) {
         new Properties().load(inStream);
       } else {

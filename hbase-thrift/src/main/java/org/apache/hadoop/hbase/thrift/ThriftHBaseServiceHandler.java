@@ -19,6 +19,8 @@
 
 package org.apache.hadoop.hbase.thrift;
 
+import static org.apache.hadoop.hbase.HConstants.DEFAULT_HBASE_CLIENT_SCANNER_TIMEOUT_PERIOD;
+import static org.apache.hadoop.hbase.HConstants.HBASE_CLIENT_SCANNER_TIMEOUT_PERIOD;
 import static org.apache.hadoop.hbase.thrift.Constants.COALESCE_INC_KEY;
 import static org.apache.hadoop.hbase.util.Bytes.getBytes;
 
@@ -26,17 +28,17 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
-
+import java.util.concurrent.TimeUnit;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellBuilder;
 import org.apache.hadoop.hbase.CellBuilderFactory;
 import org.apache.hadoop.hbase.CellBuilderType;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.DoNotRetryIOException;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionLocation;
@@ -85,6 +87,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.hbase.thirdparty.com.google.common.base.Throwables;
+import org.apache.hbase.thirdparty.com.google.common.cache.Cache;
+import org.apache.hbase.thirdparty.com.google.common.cache.CacheBuilder;
 
 /**
  * The HBaseServiceHandler is a glue object that connects Thrift RPC calls to the
@@ -99,7 +103,7 @@ public class ThriftHBaseServiceHandler extends HBaseServiceHandler implements Hb
 
   // nextScannerId and scannerMap are used to manage scanner state
   private int nextScannerId = 0;
-  private HashMap<Integer, ResultScannerWrapper> scannerMap;
+  private Cache<Integer, ResultScannerWrapper> scannerMap;
   IncrementCoalescer coalescer;
 
   /**
@@ -141,7 +145,7 @@ public class ThriftHBaseServiceHandler extends HBaseServiceHandler implements Hb
    * @return a Scanner, or null if ID was invalid.
    */
   private synchronized ResultScannerWrapper getScanner(int id) {
-    return scannerMap.get(id);
+    return scannerMap.getIfPresent(id);
   }
 
   /**
@@ -151,14 +155,19 @@ public class ThriftHBaseServiceHandler extends HBaseServiceHandler implements Hb
    * @param id the ID of the scanner to remove
    * @return a Scanner, or null if ID was invalid.
    */
-  private synchronized ResultScannerWrapper removeScanner(int id) {
-    return scannerMap.remove(id);
+  private synchronized void removeScanner(int id) {
+    scannerMap.invalidate(id);
   }
 
   protected ThriftHBaseServiceHandler(final Configuration c,
       final UserProvider userProvider) throws IOException {
     super(c, userProvider);
-    scannerMap = new HashMap<>();
+    long cacheTimeout = c.getLong(HBASE_CLIENT_SCANNER_TIMEOUT_PERIOD, DEFAULT_HBASE_CLIENT_SCANNER_TIMEOUT_PERIOD) * 2;
+
+    scannerMap = CacheBuilder.newBuilder()
+      .expireAfterAccess(cacheTimeout, TimeUnit.MILLISECONDS)
+      .build();
+
     this.coalescer = new IncrementCoalescer(this);
   }
 
@@ -863,6 +872,10 @@ public class ThriftHBaseServiceHandler extends HBaseServiceHandler implements Hb
     } catch (IOException e) {
       LOG.warn(e.getMessage(), e);
       throw getIOError(e);
+    } finally {
+      // Add scanner back to scannerMap; protects against case
+      // where scanner expired during processing of request.
+      scannerMap.put(id, resultScannerWrapper);
     }
     return ThriftUtilities.rowResultFromHBase(results, resultScannerWrapper.isColumnSorted());
   }
@@ -1278,6 +1291,7 @@ public class ThriftHBaseServiceHandler extends HBaseServiceHandler implements Hb
 
   private static IOError getIOError(Throwable throwable) {
     IOError error = new IOErrorWithCause(throwable);
+    error.setCanRetry(!(throwable instanceof DoNotRetryIOException));
     error.setMessage(Throwables.getStackTraceAsString(throwable));
     return error;
   }

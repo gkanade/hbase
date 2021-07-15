@@ -130,10 +130,8 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
 
   private static final Logger LOG = LoggerFactory.getLogger(AsyncFSWAL.class);
 
-  private static final Comparator<SyncFuture> SEQ_COMPARATOR = (o1, o2) -> {
-    int c = Long.compare(o1.getTxid(), o2.getTxid());
-    return c != 0 ? c : Integer.compare(System.identityHashCode(o1), System.identityHashCode(o2));
-  };
+  private static final Comparator<SyncFuture> SEQ_COMPARATOR = Comparator.comparingLong(
+      SyncFuture::getTxid).thenComparingInt(System::identityHashCode);
 
   public static final String WAL_BATCH_SIZE = "hbase.wal.batch.size";
   public static final long DEFAULT_WAL_BATCH_SIZE = 64L * 1024;
@@ -253,6 +251,14 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
       DEFAULT_ASYNC_WAL_WAIT_ON_SHUTDOWN_IN_SECONDS);
   }
 
+  /**
+   * Helper that marks the future as DONE and offers it back to the cache.
+   */
+  private void markFutureDoneAndOffer(SyncFuture future, long txid, Throwable t) {
+    future.done(txid, t);
+    syncFutureCache.offer(future);
+  }
+
   private static boolean waitingRoll(int epochAndState) {
     return (epochAndState & 1) != 0;
   }
@@ -353,7 +359,8 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
   // sync futures then just use the default one.
   private boolean isHsync(long beginTxid, long endTxid) {
     SortedSet<SyncFuture> futures =
-      syncFutures.subSet(new SyncFuture().reset(beginTxid), new SyncFuture().reset(endTxid + 1));
+      syncFutures.subSet(new SyncFuture().reset(beginTxid, false),
+          new SyncFuture().reset(endTxid + 1, false));
     if (futures.isEmpty()) {
       return useHsync;
     }
@@ -393,7 +400,7 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
     for (Iterator<SyncFuture> iter = syncFutures.iterator(); iter.hasNext();) {
       SyncFuture sync = iter.next();
       if (sync.getTxid() <= txid) {
-        sync.done(txid, null);
+        markFutureDoneAndOffer(sync, txid, null);
         iter.remove();
         finished++;
         if (addSyncTrace) {
@@ -415,7 +422,7 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
         long maxSyncTxid = highestSyncedTxid.get();
         for (SyncFuture sync : syncFutures) {
           maxSyncTxid = Math.max(maxSyncTxid, sync.getTxid());
-          sync.done(maxSyncTxid, null);
+          markFutureDoneAndOffer(sync, maxSyncTxid, null);
           if (addSyncTrace) {
             addTimeAnnotation(sync, "writer synced");
           }
@@ -751,7 +758,7 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
       }
     }
     // and fail them
-    syncFutures.forEach(f -> f.done(f.getTxid(), error));
+    syncFutures.forEach(f -> markFutureDoneAndOffer(f, f.getTxid(), error));
     if (!(consumeExecutor instanceof EventLoop)) {
       consumeExecutor.shutdown();
     }

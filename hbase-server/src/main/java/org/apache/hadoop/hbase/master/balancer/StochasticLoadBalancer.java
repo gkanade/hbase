@@ -17,12 +17,14 @@
  */
 package org.apache.hadoop.hbase.master.balancer;
 
+import com.google.errorprone.annotations.RestrictedApi;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -38,7 +40,6 @@ import org.apache.hadoop.hbase.ServerMetrics;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.RegionInfo;
-import org.apache.hadoop.hbase.master.MasterServices;
 import org.apache.hadoop.hbase.master.RegionPlan;
 import org.apache.hadoop.hbase.master.balancer.BaseLoadBalancer.Cluster.Action;
 import org.apache.hadoop.hbase.master.balancer.BaseLoadBalancer.Cluster.Action.Type;
@@ -142,13 +143,12 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
   private float minCostNeedBalance = 0.05f;
 
   private List<CandidateGenerator> candidateGenerators;
-  private CostFromRegionLoadFunction[] regionLoadFunctions;
   private List<CostFunction> costFunctions; // FindBugs: Wants this protected; IS2_INCONSISTENT_SYNC
 
   // to save and report costs to JMX
-  private Double curOverallCost = 0d;
-  private Double[] tempFunctionCosts;
-  private Double[] curFunctionCosts;
+  private double curOverallCost = 0d;
+  private double[] tempFunctionCosts;
+  private double[] curFunctionCosts;
 
   // Keep locality based picker and cost function to alert them
   // when new services are offered
@@ -182,10 +182,10 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
     numRegionLoadsToRemember = conf.getInt(KEEP_REGION_LOADS, numRegionLoadsToRemember);
     minCostNeedBalance = conf.getFloat(MIN_COST_NEED_BALANCE_KEY, minCostNeedBalance);
     if (localityCandidateGenerator == null) {
-      localityCandidateGenerator = new LocalityBasedCandidateGenerator(services);
+      localityCandidateGenerator = new LocalityBasedCandidateGenerator();
     }
-    localityCost = new ServerLocalityCostFunction(conf, services);
-    rackLocalityCost = new RackLocalityCostFunction(conf, services);
+    localityCost = new ServerLocalityCostFunction(conf);
+    rackLocalityCost = new RackLocalityCostFunction(conf);
 
     if (this.candidateGenerators == null) {
       candidateGenerators = Lists.newArrayList();
@@ -194,32 +194,26 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
       candidateGenerators.add(localityCandidateGenerator);
       candidateGenerators.add(new RegionReplicaRackCandidateGenerator());
     }
-    regionLoadFunctions = new CostFromRegionLoadFunction[] {
-      new ReadRequestCostFunction(conf),
-      new WriteRequestCostFunction(conf),
-      new MemStoreSizeCostFunction(conf),
-      new StoreFileCostFunction(conf)
-    };
     regionReplicaHostCostFunction = new RegionReplicaHostCostFunction(conf);
     regionReplicaRackCostFunction = new RegionReplicaRackCostFunction(conf);
 
     costFunctions = new ArrayList<>();
-    costFunctions.add(new RegionCountSkewCostFunction(conf));
-    costFunctions.add(new PrimaryRegionCountSkewCostFunction(conf));
-    costFunctions.add(new MoveCostFunction(conf));
-    costFunctions.add(localityCost);
-    costFunctions.add(rackLocalityCost);
-    costFunctions.add(new TableSkewCostFunction(conf));
-    costFunctions.add(regionReplicaHostCostFunction);
-    costFunctions.add(regionReplicaRackCostFunction);
-    costFunctions.add(regionLoadFunctions[0]);
-    costFunctions.add(regionLoadFunctions[1]);
-    costFunctions.add(regionLoadFunctions[2]);
-    costFunctions.add(regionLoadFunctions[3]);
+    addCostFunction(new RegionCountSkewCostFunction(conf));
+    addCostFunction(new PrimaryRegionCountSkewCostFunction(conf));
+    addCostFunction(new MoveCostFunction(conf));
+    addCostFunction(localityCost);
+    addCostFunction(rackLocalityCost);
+    addCostFunction(new TableSkewCostFunction(conf));
+    addCostFunction(regionReplicaHostCostFunction);
+    addCostFunction(regionReplicaRackCostFunction);
+    addCostFunction(new ReadRequestCostFunction(conf));
+    addCostFunction(new WriteRequestCostFunction(conf));
+    addCostFunction(new MemStoreSizeCostFunction(conf));
+    addCostFunction(new StoreFileCostFunction(conf));
     loadCustomCostFunctions(conf);
 
-    curFunctionCosts = new Double[costFunctions.size()];
-    tempFunctionCosts = new Double[costFunctions.size()];
+    curFunctionCosts = new double[costFunctions.size()];
+    tempFunctionCosts = new double[costFunctions.size()];
 
     LOG.info("Loaded config; maxSteps=" + maxSteps + ", stepsPerRegion=" + stepsPerRegion +
             ", maxRunningTime=" + maxRunningTime + ", isByTable=" + isByTable + ", CostFunctions=" +
@@ -237,7 +231,7 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
             .map(c -> {
               Class<? extends CostFunction> klass = null;
               try {
-                klass = (Class<? extends CostFunction>) Class.forName(c);
+                klass = Class.forName(c).asSubclass(CostFunction.class);
               } catch (ClassNotFoundException e) {
                 LOG.warn("Cannot load class " + c + "': " + e.getMessage());
               }
@@ -259,6 +253,13 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
     this.candidateGenerators = customCandidateGenerators;
   }
 
+  /**
+   * Exposed for Testing!
+   */
+  public List<CandidateGenerator> getCandidateGenerators() {
+    return this.candidateGenerators;
+  }
+
   @Override
   protected void setSlop(Configuration conf) {
     this.slop = conf.getFloat("hbase.regions.slop", 0.001F);
@@ -268,9 +269,6 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
   public synchronized void setClusterMetrics(ClusterMetrics st) {
     super.setClusterMetrics(st);
     updateRegionLoad();
-    for(CostFromRegionLoadFunction cost : regionLoadFunctions) {
-      cost.setClusterMetrics(st);
-    }
 
     // update metrics size
     try {
@@ -294,19 +292,15 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
   }
 
   @Override
-  public synchronized void setMasterServices(MasterServices masterServices) {
-    super.setMasterServices(masterServices);
-    this.localityCost.setServices(masterServices);
-    this.rackLocalityCost.setServices(masterServices);
-    this.localityCandidateGenerator.setServices(masterServices);
-  }
-
-  @Override
   protected synchronized boolean areSomeRegionReplicasColocated(Cluster c) {
     regionReplicaHostCostFunction.init(c);
-    if (regionReplicaHostCostFunction.cost() > 0) return true;
+    if (regionReplicaHostCostFunction.cost() > 0) {
+      return true;
+    }
     regionReplicaRackCostFunction.init(c);
-    if (regionReplicaRackCostFunction.cost() > 0) return true;
+    if (regionReplicaRackCostFunction.cost() > 0) {
+      return true;
+    }
     return false;
   }
 
@@ -491,8 +485,10 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
   /**
    * update costs to JMX
    */
-  private void updateStochasticCosts(TableName tableName, Double overall, Double[] subCosts) {
-    if (tableName == null) return;
+  private void updateStochasticCosts(TableName tableName, double overall, double[] subCosts) {
+    if (tableName == null) {
+      return;
+    }
 
     // check if the metricsBalancer is MetricsStochasticBalancer before casting
     if (metricsBalancer instanceof MetricsStochasticBalancer) {
@@ -505,7 +501,7 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
       for (int i = 0; i < costFunctions.size(); i++) {
         CostFunction costFunction = costFunctions.get(i);
         String costFunctionName = costFunction.getClass().getSimpleName();
-        Double costPercent = (overall == 0) ? 0 : (subCosts[i] / overall);
+        double costPercent = (overall == 0) ? 0 : (subCosts[i] / overall);
         // TODO: cost function may need a specific description
         balancer.updateStochasticCost(tableName.getNameAsString(), costFunctionName,
           "The percent of " + costFunctionName, costPercent);
@@ -513,14 +509,24 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
     }
   }
 
+  private void addCostFunction(CostFunction costFunction) {
+    if (costFunction.getMultiplier() > 0) {
+      costFunctions.add(costFunction);
+    }
+  }
+
   private String functionCost() {
     StringBuilder builder = new StringBuilder();
-    for (CostFunction c:costFunctions) {
+    for (CostFunction c : costFunctions) {
       builder.append(c.getClass().getSimpleName());
       builder.append(" : (");
-      builder.append(c.getMultiplier());
-      builder.append(", ");
-      builder.append(c.cost());
+      if (c.isNeeded()) {
+        builder.append(c.getMultiplier());
+        builder.append(", ");
+        builder.append(c.cost());
+      } else {
+        builder.append("not needed");
+      }
       builder.append("); ");
     }
     return builder.toString();
@@ -578,29 +584,32 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
         loads.put(regionNameAsString, rLoads);
       });
     });
-
-    for(CostFromRegionLoadFunction cost : regionLoadFunctions) {
-      cost.setLoads(loads);
-    }
   }
 
-  protected void initCosts(Cluster cluster) {
+  @RestrictedApi(explanation = "Should only be called in tests", link = "",
+    allowedOnPath = ".*(/src/test/.*|StochasticLoadBalancer).java")
+  void initCosts(Cluster cluster) {
     for (CostFunction c:costFunctions) {
       c.init(cluster);
     }
   }
 
-  protected void updateCostsWithAction(Cluster cluster, Action action) {
+  @RestrictedApi(explanation = "Should only be called in tests", link = "",
+    allowedOnPath = ".*(/src/test/.*|StochasticLoadBalancer).java")
+  void updateCostsWithAction(Cluster cluster, Action action) {
     for (CostFunction c : costFunctions) {
-      c.postAction(action);
+      if (c.getMultiplier() > 0 && c.isNeeded()) {
+        c.postAction(action);
+      }
     }
   }
 
   /**
    * Get the names of the cost functions
    */
-  public String[] getCostFunctionNames() {
-    if (costFunctions == null) return null;
+  @RestrictedApi(explanation = "Should only be called in tests", link = "",
+    allowedOnPath = ".*(/src/test/.*|StochasticLoadBalancer).java")
+  String[] getCostFunctionNames() {
     String[] ret = new String[costFunctions.size()];
     for (int i = 0; i < costFunctions.size(); i++) {
       CostFunction c = costFunctions.get(i);
@@ -619,19 +628,21 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
    * @return a double of a cost associated with the proposed cluster state.  This cost is an
    *         aggregate of all individual cost functions.
    */
-  protected double computeCost(Cluster cluster, double previousCost) {
+  @RestrictedApi(explanation = "Should only be called in tests", link = "",
+    allowedOnPath = ".*(/src/test/.*|StochasticLoadBalancer).java")
+  double computeCost(Cluster cluster, double previousCost) {
     double total = 0;
 
     for (int i = 0; i < costFunctions.size(); i++) {
       CostFunction c = costFunctions.get(i);
       this.tempFunctionCosts[i] = 0.0;
 
-      if (c.getMultiplier() <= 0) {
+      if (c.getMultiplier() <= 0 || !c.isNeeded()) {
         continue;
       }
 
       Float multiplier = c.getMultiplier();
-      Double cost = c.cost();
+      double cost = c.cost();
 
       this.tempFunctionCosts[i] = multiplier*cost;
       total += this.tempFunctionCosts[i];
@@ -750,75 +761,24 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
     }
 
     protected abstract double cost();
+  }
 
-    @SuppressWarnings("checkstyle:linelength")
-    /**
-     * Function to compute a scaled cost using
-     * {@link org.apache.commons.math3.stat.descriptive.DescriptiveStatistics#DescriptiveStatistics()}.
-     * It assumes that this is a zero sum set of costs.  It assumes that the worst case
-     * possible is all of the elements in one region server and the rest having 0.
-     *
-     * @param stats the costs
-     * @return a scaled set of costs.
-     */
-    protected double costFromArray(double[] stats) {
-      double totalCost = 0;
-      double total = getSum(stats);
-
-      double count = stats.length;
-      double mean = total/count;
-
-      // Compute max as if all region servers had 0 and one had the sum of all costs.  This must be
-      // a zero sum cost for this to make sense.
-      double max = ((count - 1) * mean) + (total - mean);
-
-      // It's possible that there aren't enough regions to go around
-      double min;
-      if (count > total) {
-        min = ((count - total) * mean) + ((1 - mean) * total);
-      } else {
-        // Some will have 1 more than everything else.
-        int numHigh = (int) (total - (Math.floor(mean) * count));
-        int numLow = (int) (count - numHigh);
-
-        min = (numHigh * (Math.ceil(mean) - mean)) + (numLow * (mean - Math.floor(mean)));
-
-      }
-      min = Math.max(0, min);
-      for (int i=0; i<stats.length; i++) {
-        double n = stats[i];
-        double diff = Math.abs(mean - n);
-        totalCost += diff;
-      }
-
-      double scaled =  scale(min, max, totalCost);
-      return scaled;
+  /**
+   * Scale the value between 0 and 1.
+   * @param min Min value
+   * @param max The Max value
+   * @param value The value to be scaled.
+   * @return The scaled value.
+   */
+  static double scale(double min, double max, double value) {
+    if (max <= min || value <= min) {
+      return 0;
+    }
+    if ((max - min) == 0) {
+      return 0;
     }
 
-    private double getSum(double[] stats) {
-      double total = 0;
-      for(double s:stats) {
-        total += s;
-      }
-      return total;
-    }
-
-    /**
-     * Scale the value between 0 and 1.
-     *
-     * @param min   Min value
-     * @param max   The Max value
-     * @param value The value to be scaled.
-     * @return The scaled value.
-     */
-    protected double scale(double min, double max, double value) {
-      if (max <= min || value <= min) {
-        return 0;
-      }
-      if ((max - min) == 0) return 0;
-
-      return Math.max(0d, Math.min(1d, (value - min) / (max - min)));
-    }
+    return Math.max(0d, Math.min(1d, (value - min) / (max - min)));
   }
 
   /**
@@ -837,24 +797,36 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
     private static final float DEFAULT_MAX_MOVE_PERCENT = 0.25f;
 
     private final float maxMovesPercent;
-    private final Configuration conf;
+    private final OffPeakHours offPeakHours;
+    private final float moveCost;
+    private final float moveCostOffPeak;
 
     MoveCostFunction(Configuration conf) {
       super(conf);
-      this.conf = conf;
       // What percent of the number of regions a single run of the balancer can move.
       maxMovesPercent = conf.getFloat(MAX_MOVES_PERCENT_KEY, DEFAULT_MAX_MOVE_PERCENT);
+      offPeakHours = OffPeakHours.getInstance(conf);
+      moveCost = conf.getFloat(MOVE_COST_KEY, DEFAULT_MOVE_COST);
+      moveCostOffPeak = conf.getFloat(MOVE_COST_OFFPEAK_KEY, DEFAULT_MOVE_COST_OFFPEAK);
+      // Initialize the multiplier so that addCostFunction will add this cost function.
+      // It may change during later evaluations, due to OffPeakHours.
+      this.setMultiplier(moveCost);
+    }
+
+    @Override
+    void init(Cluster cluster) {
+      super.init(cluster);
+      // Move cost multiplier should be the same cost or higher than the rest of the costs to ensure
+      // that large benefits are need to overcome the cost of a move.
+      if (offPeakHours.isOffPeakHour()) {
+        this.setMultiplier(moveCostOffPeak);
+      } else {
+        this.setMultiplier(moveCost);
+      }
     }
 
     @Override
     protected double cost() {
-      // Move cost multiplier should be the same cost or higher than the rest of the costs to ensure
-      // that large benefits are need to overcome the cost of a move.
-      if (OffPeakHours.getInstance(conf).isOffPeakHour()) {
-        this.setMultiplier(conf.getFloat(MOVE_COST_OFFPEAK_KEY, DEFAULT_MOVE_COST_OFFPEAK));
-      } else {
-        this.setMultiplier(conf.getFloat(MOVE_COST_KEY, DEFAULT_MOVE_COST));
-      }
       // Try and size the max number of Moves, but always be prepared to move some.
       int maxMoves = Math.max((int) (cluster.numRegions * maxMovesPercent),
           DEFAULT_MAX_MOVES);
@@ -880,7 +852,7 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
         "hbase.master.balancer.stochastic.regionCountCost";
     static final float DEFAULT_REGION_COUNT_SKEW_COST = 500;
 
-    private double[] stats = null;
+    private final DoubleArrayCost cost = new DoubleArrayCost();
 
     RegionCountSkewCostFunction(Configuration conf) {
       super(conf);
@@ -891,8 +863,14 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
     @Override
     void init(Cluster cluster) {
       super.init(cluster);
+      cost.prepare(cluster.numServers);
+      cost.applyCostsChange(costs -> {
+        for (int i = 0; i < cluster.numServers; i++) {
+          costs[i] = cluster.regionsPerServer[i].length;
+        }
+      });
       LOG.debug("{} sees a total of {} servers and {} regions.", getClass().getSimpleName(),
-          cluster.numServers, cluster.numRegions);
+        cluster.numServers, cluster.numRegions);
       if (LOG.isTraceEnabled()) {
         for (int i =0; i < cluster.numServers; i++) {
           LOG.trace("{} sees server '{}' has {} regions", getClass().getSimpleName(),
@@ -903,13 +881,15 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
 
     @Override
     protected double cost() {
-      if (stats == null || stats.length != cluster.numServers) {
-        stats = new double[cluster.numServers];
-      }
-      for (int i =0; i < cluster.numServers; i++) {
-        stats[i] = cluster.regionsPerServer[i].length;
-      }
-      return costFromArray(stats);
+      return cost.cost();
+    }
+
+    @Override
+    protected void regionMoved(int region, int oldServer, int newServer) {
+      cost.applyCostsChange(costs -> {
+        costs[oldServer] = cluster.regionsPerServer[oldServer].length;
+        costs[newServer] = cluster.regionsPerServer[newServer].length;
+      });
     }
   }
 
@@ -922,7 +902,7 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
         "hbase.master.balancer.stochastic.primaryRegionCountCost";
     private static final float DEFAULT_PRIMARY_REGION_COUNT_SKEW_COST = 500;
 
-    private double[] stats = null;
+    private final DoubleArrayCost cost = new DoubleArrayCost();
 
     PrimaryRegionCountSkewCostFunction(Configuration conf) {
       super(conf);
@@ -931,30 +911,45 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
         DEFAULT_PRIMARY_REGION_COUNT_SKEW_COST));
     }
 
+    private double computeCostForRegionServer(int regionServerIndex) {
+      int cost = 0;
+      for (int regionIdx : cluster.regionsPerServer[regionServerIndex]) {
+        if (regionIdx == cluster.regionIndexToPrimaryIndex[regionIdx]) {
+          cost++;
+        }
+      }
+      return cost;
+    }
+
+    @Override
+    void init(Cluster cluster) {
+      super.init(cluster);
+      if (!isNeeded()) {
+        return;
+      }
+      cost.prepare(cluster.numServers);
+      cost.applyCostsChange(costs -> {
+        for (int i = 0; i < costs.length; i++) {
+          costs[i] = computeCostForRegionServer(i);
+        }
+      });
+    }
+
     @Override
     boolean isNeeded() {
       return cluster.hasRegionReplicas;
     }
 
     @Override
+    protected void regionMoved(int region, int oldServer, int newServer) {
+      cost.applyCostsChange(costs -> {
+        costs[oldServer] = computeCostForRegionServer(oldServer);
+        costs[newServer] = computeCostForRegionServer(newServer);
+      });
+    }
+    @Override
     protected double cost() {
-      if (!cluster.hasRegionReplicas) {
-        return 0;
-      }
-      if (stats == null || stats.length != cluster.numServers) {
-        stats = new double[cluster.numServers];
-      }
-
-      for (int i = 0; i < cluster.numServers; i++) {
-        stats[i] = 0;
-        for (int regionIdx : cluster.regionsPerServer[i]) {
-          if (regionIdx == cluster.regionIndexToPrimaryIndex[regionIdx]) {
-            stats[i]++;
-          }
-        }
-      }
-
-      return costFromArray(stats);
+      return cost.cost();
     }
   }
 
@@ -998,17 +993,11 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
     private double bestLocality; // best case locality across cluster weighted by local data size
     private double locality; // current locality across cluster weighted by local data size
 
-    private MasterServices services;
-
-    LocalityBasedCostFunction(Configuration conf,
-                              MasterServices srv,
-                              LocalityType type,
-                              String localityCostKey,
-                              float defaultLocalityCost) {
+    LocalityBasedCostFunction(Configuration conf, LocalityType type, String localityCostKey,
+      float defaultLocalityCost) {
       super(conf);
       this.type = type;
       this.setMultiplier(conf.getFloat(localityCostKey, defaultLocalityCost));
-      this.services = srv;
       this.locality = 0.0;
       this.bestLocality = 0.0;
     }
@@ -1018,20 +1007,11 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
      */
     abstract int regionIndexToEntityIndex(int region);
 
-    public void setServices(MasterServices srvc) {
-      this.services = srvc;
-    }
-
     @Override
     void init(Cluster cluster) {
       super.init(cluster);
       locality = 0.0;
       bestLocality = 0.0;
-
-      // If no master, no computation will work, so assume 0 cost
-      if (this.services == null) {
-        return;
-      }
 
       for (int region = 0; region < cluster.numRegions; region++) {
         locality += getWeightedLocality(region, regionIndexToEntityIndex(region));
@@ -1048,9 +1028,6 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
     protected void regionMoved(int region, int oldServer, int newServer) {
       int oldEntity = type == LocalityType.SERVER ? oldServer : cluster.serverIndexToRackIndex[oldServer];
       int newEntity = type == LocalityType.SERVER ? newServer : cluster.serverIndexToRackIndex[newServer];
-      if (this.services == null) {
-        return;
-      }
       double localityDelta = getWeightedLocality(region, newEntity) - getWeightedLocality(region, oldEntity);
       double normalizedDelta = bestLocality == 0 ? 0.0 : localityDelta / bestLocality;
       locality += normalizedDelta;
@@ -1076,14 +1053,8 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
     private static final String LOCALITY_COST_KEY = "hbase.master.balancer.stochastic.localityCost";
     private static final float DEFAULT_LOCALITY_COST = 25;
 
-    ServerLocalityCostFunction(Configuration conf, MasterServices srv) {
-      super(
-          conf,
-          srv,
-          LocalityType.SERVER,
-          LOCALITY_COST_KEY,
-          DEFAULT_LOCALITY_COST
-      );
+    ServerLocalityCostFunction(Configuration conf) {
+      super(conf, LocalityType.SERVER, LOCALITY_COST_KEY, DEFAULT_LOCALITY_COST);
     }
 
     @Override
@@ -1097,14 +1068,8 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
     private static final String RACK_LOCALITY_COST_KEY = "hbase.master.balancer.stochastic.rackLocalityCost";
     private static final float DEFAULT_RACK_LOCALITY_COST = 15;
 
-    public RackLocalityCostFunction(Configuration conf, MasterServices services) {
-      super(
-          conf,
-          services,
-          LocalityType.RACK,
-          RACK_LOCALITY_COST_KEY,
-          DEFAULT_RACK_LOCALITY_COST
-      );
+    public RackLocalityCostFunction(Configuration conf) {
+      super(conf, LocalityType.RACK, RACK_LOCALITY_COST_KEY, DEFAULT_RACK_LOCALITY_COST);
     }
 
     @Override
@@ -1119,51 +1084,51 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
    */
   abstract static class CostFromRegionLoadFunction extends CostFunction {
 
-    private ClusterMetrics clusterStatus = null;
-    private Map<String, Deque<BalancerRegionLoad>> loads = null;
-    private double[] stats = null;
+    private final DoubleArrayCost cost = new DoubleArrayCost();
+
     CostFromRegionLoadFunction(Configuration conf) {
       super(conf);
     }
 
-    void setClusterMetrics(ClusterMetrics status) {
-      this.clusterStatus = status;
-    }
+    private double computeCostForRegionServer(int regionServerIndex) {
+      // Cost this server has from RegionLoad
+      double cost = 0;
 
-    void setLoads(Map<String, Deque<BalancerRegionLoad>> l) {
-      this.loads = l;
+      // for every region on this server get the rl
+      for (int regionIndex : cluster.regionsPerServer[regionServerIndex]) {
+        Collection<BalancerRegionLoad> regionLoadList = cluster.regionLoads[regionIndex];
+
+        // Now if we found a region load get the type of cost that was requested.
+        if (regionLoadList != null) {
+          cost += getRegionLoadCost(regionLoadList);
+        }
+      }
+      return cost;
     }
 
     @Override
-    protected double cost() {
-      if (clusterStatus == null || loads == null) {
-        return 0;
-      }
-
-      if (stats == null || stats.length != cluster.numServers) {
-        stats = new double[cluster.numServers];
-      }
-
-      for (int i =0; i < stats.length; i++) {
-        //Cost this server has from RegionLoad
-        long cost = 0;
-
-        // for every region on this server get the rl
-        for(int regionIndex:cluster.regionsPerServer[i]) {
-          Collection<BalancerRegionLoad> regionLoadList =  cluster.regionLoads[regionIndex];
-
-          // Now if we found a region load get the type of cost that was requested.
-          if (regionLoadList != null) {
-            cost = (long) (cost + getRegionLoadCost(regionLoadList));
-          }
+    void init(Cluster cluster) {
+      super.init(cluster);
+      cost.prepare(cluster.numServers);
+      cost.applyCostsChange(costs -> {
+        for (int i = 0; i < costs.length; i++) {
+          costs[i] = computeCostForRegionServer(i);
         }
+      });
+    }
 
-        // Add the total cost to the stats.
-        stats[i] = cost;
-      }
+    @Override
+    protected void regionMoved(int region, int oldServer, int newServer) {
+      // recompute the stat for the given two region servers
+      cost.applyCostsChange(costs -> {
+        costs[oldServer] = computeCostForRegionServer(oldServer);
+        costs[newServer] = computeCostForRegionServer(newServer);
+      });
+    }
 
-      // Now return the scaled cost from data held in the stats object.
-      return costFromArray(stats);
+    @Override
+    protected final double cost() {
+      return cost.cost();
     }
 
     protected double getRegionLoadCost(Collection<BalancerRegionLoad> regionLoadList) {
@@ -1190,18 +1155,20 @@ public class StochasticLoadBalancer extends BaseLoadBalancer {
 
     @Override
     protected double getRegionLoadCost(Collection<BalancerRegionLoad> regionLoadList) {
-      double cost = 0;
-      double previous = 0;
-      boolean isFirst = true;
-      for (BalancerRegionLoad rl : regionLoadList) {
-        double current = getCostFromRl(rl);
-        if (isFirst) {
-          isFirst = false;
-        } else {
-          cost += current - previous;
-        }
-        previous = current;
+      Iterator<BalancerRegionLoad> iter = regionLoadList.iterator();
+      if (!iter.hasNext()) {
+        return 0;
       }
+      double previous = getCostFromRl(iter.next());
+      if (!iter.hasNext()) {
+        return 0;
+      }
+      double cost = 0;
+      do {
+        double current = getCostFromRl(iter.next());
+        cost += current - previous;
+        previous = current;
+      } while (iter.hasNext());
       return Math.max(0, cost / (regionLoadList.size() - 1));
     }
   }

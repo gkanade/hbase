@@ -313,10 +313,10 @@ public abstract class Compactor<T extends CellSink> {
       dropCache = this.dropCacheMinor;
     }
 
-    List<StoreFileScanner> scanners =
-        createFileScanners(request.getFiles(), smallestReadPoint, dropCache);
     InternalScanner scanner = null;
     boolean finished = false;
+    List<StoreFileScanner> scanners =
+      createFileScanners(request.getFiles(), smallestReadPoint, dropCache);
     try {
       /* Include deletes, unless we are doing a major compaction */
       ScanType scanType = scannerFactory.getScanType(request);
@@ -337,7 +337,18 @@ public abstract class Compactor<T extends CellSink> {
             + store.getRegionInfo().getRegionNameAsString() + " because it was interrupted.");
       }
     } finally {
-      Closeables.close(scanner, true);
+      // createScanner may fail when seeking hfiles encounter Exception, e.g. even only one hfile
+      // reader encounters java.io.IOException: Invalid HFile block magic:
+      // \x00\x00\x00\x00\x00\x00\x00\x00
+      // and then scanner will be null, but scanners for all the hfiles should be closed,
+      // or else we will find leak of ESTABLISHED sockets.
+      if (scanner == null) {
+        for (StoreFileScanner sfs : scanners) {
+          sfs.close();
+        }
+      } else {
+        Closeables.close(scanner, true);
+      }
       if (!finished && writer != null) {
         abortWriter(writer);
       }
@@ -427,25 +438,25 @@ public abstract class Compactor<T extends CellSink> {
               }
             }
           }
-          if (kvs != null && bytesWrittenProgressForShippedCall > shippedCallSizeLimit) {
-            if (lastCleanCell != null) {
-              // HBASE-16931, set back sequence id to avoid affecting scan order unexpectedly.
-              // ShipperListener will do a clone of the last cells it refer, so need to set back
-              // sequence id before ShipperListener.beforeShipped
-              PrivateCellUtil.setSequenceId(lastCleanCell, lastCleanCellSeqId);
-            }
-            // Clone the cells that are in the writer so that they are freed of references,
-            // if they are holding any.
-            ((ShipperListener) writer).beforeShipped();
-            // The SHARED block references, being read for compaction, will be kept in prevBlocks
-            // list(See HFileScannerImpl#prevBlocks). In case of scan flow, after each set of cells
-            // being returned to client, we will call shipped() which can clear this list. Here by
-            // we are doing the similar thing. In between the compaction (after every N cells
-            // written with collective size of 'shippedCallSizeLimit') we will call shipped which
-            // may clear prevBlocks list.
-            kvs.shipped();
-            bytesWrittenProgressForShippedCall = 0;
+        }
+        if (kvs != null && bytesWrittenProgressForShippedCall > shippedCallSizeLimit) {
+          if (lastCleanCell != null) {
+            // HBASE-16931, set back sequence id to avoid affecting scan order unexpectedly.
+            // ShipperListener will do a clone of the last cells it refer, so need to set back
+            // sequence id before ShipperListener.beforeShipped
+            PrivateCellUtil.setSequenceId(lastCleanCell, lastCleanCellSeqId);
           }
+          // Clone the cells that are in the writer so that they are freed of references,
+          // if they are holding any.
+          ((ShipperListener) writer).beforeShipped();
+          // The SHARED block references, being read for compaction, will be kept in prevBlocks
+          // list(See HFileScannerImpl#prevBlocks). In case of scan flow, after each set of cells
+          // being returned to client, we will call shipped() which can clear this list. Here by
+          // we are doing the similar thing. In between the compaction (after every N cells
+          // written with collective size of 'shippedCallSizeLimit') we will call shipped which
+          // may clear prevBlocks list.
+          kvs.shipped();
+          bytesWrittenProgressForShippedCall = 0;
         }
         if (lastCleanCell != null) {
           // HBASE-16931, set back sequence id to avoid affecting scan order unexpectedly

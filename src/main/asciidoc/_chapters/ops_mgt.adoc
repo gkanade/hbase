@@ -424,32 +424,11 @@ See <<hfile_tool>>.
 For bulk replaying WAL files or _recovered.edits_ files, see
 <<walplayer>>. For reading/verifying individual files, read on.
 
-[[hlog_tool]]
-==== FSHLog tool
-
-The main method on `FSHLog` offers manual split and dump facilities.
-Pass it WALs or the product of a split, the content of the _recovered.edits_.
-directory.
-
-You can get a textual dump of a WAL file content by doing the following:
-
-----
- $ ./bin/hbase org.apache.hadoop.hbase.regionserver.wal.FSHLog --dump hdfs://example.org:8020/hbase/WALs/example.org,60020,1283516293161/10.10.21.10%3A60020.1283973724012
-----
-
-The return code will be non-zero if there are any issues with the file so you can test wholesomeness of file by redirecting `STDOUT` to `/dev/null` and testing the program return.
-
-Similarly you can force a split of a log file directory by doing:
-
-----
- $ ./bin/hbase org.apache.hadoop.hbase.regionserver.wal.FSHLog --split hdfs://example.org:8020/hbase/WALs/example.org,60020,1283516293161/
-----
-
 [[hlog_tool.prettyprint]]
-===== WALPrettyPrinter
+==== WALPrettyPrinter
 
-The `WALPrettyPrinter` is a tool with configurable options to print the contents of a WAL.
-You can invoke it via the HBase cli with the 'wal' command.
+The `WALPrettyPrinter` is a tool with configurable options to print the contents of a WAL
+or a _recovered.edits_ file. You can invoke it via the HBase cli with the 'wal' command.
 
 ----
  $ ./bin/hbase wal hdfs://example.org:8020/hbase/WALs/example.org,60020,1283516293161/10.10.21.10%3A60020.1283973724012
@@ -756,6 +735,9 @@ specifying column families and applying filters during the export.
 
 By default, the `Export` tool only exports the newest version of a given cell, regardless of the number of versions stored. To export more than one version, replace *_<versions>_* with the desired number of versions.
 
+For mapreduce based Export, if you want to export cell tags then set the following config property
+`hbase.client.rpc.codec` to `org.apache.hadoop.hbase.codec.KeyValueCodecWithTags`
+
 Note: caching for the input Scan is configured via `hbase.client.scanner.caching` in the job configuration.
 
 [[import]]
@@ -775,6 +757,9 @@ To import 0.94 exported files in a 0.96 cluster or onwards, you need to set syst
 ----
 $ bin/hbase -Dhbase.import.version=0.94 org.apache.hadoop.hbase.mapreduce.Import <tablename> <inputdir>
 ----
+
+If you want to import cell tags then set the following config property
+`hbase.client.rpc.codec` to `org.apache.hadoop.hbase.codec.KeyValueCodecWithTags`
 
 [[importtsv]]
 === ImportTsv
@@ -904,7 +889,10 @@ The output can optionally be mapped to another set of tables.
 
 WALPlayer can also generate HFiles for later bulk importing, in that case only a single table and no mapping can be specified.
 
-.WALPrettyPrinter/FSHLog Tool
+Finally, you can use WALPlayer to replay the content of a Regions `recovered.edits` directory (the files under
+`recovered.edits` directory have the same format as WAL files).
+
+.WALPrettyPrinter
 [NOTE]
 ====
 To read or verify single WAL files or _recovered.edits_ files, since they share the WAL format,
@@ -914,7 +902,7 @@ see <<_wal_tools>>.
 Invoke via:
 
 ----
-$ bin/hbase org.apache.hadoop.hbase.mapreduce.WALPlayer [options] <wal inputdir> <tables> [<tableMappings>]>
+$ bin/hbase org.apache.hadoop.hbase.mapreduce.WALPlayer [options] <WAL inputdir> [<tables> <tableMappings>]>
 ----
 
 For example:
@@ -932,29 +920,27 @@ To NOT run WALPlayer as a mapreduce job on your cluster, force it to run all in 
 Running `WALPlayer` with no arguments prints brief usage information:
 
 ----
-Usage: WALPlayer [options] <wal inputdir> <tables> [<tableMappings>]
-Replay all WAL files into HBase.
-<tables> is a comma separated list of tables.
-If no tables ("") are specified, all tables are imported.
-(Be careful, hbase:meta entries will be imported in this case.)
-
-WAL entries can be mapped to new set of tables via <tableMappings>.
-<tableMappings> is a comma separated list of target tables.
-If specified, each table in <tables> must have a mapping.
-
-By default WALPlayer will load data directly into HBase.
-To generate HFiles for a bulk data load instead, pass the following option:
-  -Dwal.bulk.output=/path/for/output
-  (Only one table can be specified, and no mapping is allowed!)
-Time range options:
-  -Dwal.start.time=[date|ms]
-  -Dwal.end.time=[date|ms]
-  (The start and the end date of timerange. The dates can be expressed
-  in milliseconds since epoch or in yyyy-MM-dd'T'HH:mm:ss.SS format.
-  E.g. 1234567890120 or 2009-02-13T23:32:30.12)
+Usage: WALPlayer [options] <WAL inputdir> [<tables> <tableMappings>]
+ <WAL inputdir>   directory of WALs to replay.
+ <tables>         comma separated list of tables. If no tables specified,
+                  all are imported (even hbase:meta if present).
+ <tableMappings>  WAL entries can be mapped to a new set of tables by passing
+                  <tableMappings>, a comma separated list of target tables.
+                  If specified, each table in <tables> must have a mapping.
+To generate HFiles to bulk load instead of loading HBase directly, pass:
+ -Dwal.bulk.output=/path/for/output
+ Only one table can be specified, and no mapping allowed!
+To specify a time range, pass:
+ -Dwal.start.time=[date|ms]
+ -Dwal.end.time=[date|ms]
+ The start and the end date of timerange (inclusive). The dates can be
+ expressed in milliseconds-since-epoch or yyyy-MM-dd'T'HH:mm:ss.SS format.
+ E.g. 1234567890120 or 2009-02-13T23:32:30.12
 Other options:
-  -Dmapreduce.job.name=jobName
-  Use the specified mapreduce job name for the wal player
+ -Dmapreduce.job.name=jobName
+ Use the specified mapreduce job name for the wal player
+ -Dwal.input.separator=' '
+ Change WAL filename separator (WAL dir names use default ','.)
 For performance also consider the following options:
   -Dmapreduce.map.speculative=false
   -Dmapreduce.reduce.speculative=false
@@ -3175,6 +3161,21 @@ providing default TTL in sec for key: `hbase.master.snapshot.ttl`.
 Value 0 for this config indicates TTL: FOREVER
 
 
+.Take a snapshot with custom MAX_FILESIZE
+
+Optionally, snapshots can be created with a custom max file size configuration that will be
+used by cloned tables, instead of the global `hbase.hregion.max.filesize` configuration property.
+This is mostly useful when exporting snapshots between different clusters. If the HBase cluster where
+the snapshot is originally taken has a much larger value set for `hbase.hregion.max.filesize` than
+one or more clusters where the snapshot is being exported to, a storm of region splits may occur when
+restoring the snapshot on destination clusters. Specifying `MAX_FILESIZE` on properties passed to
+`snapshot` command will save informed value into the table's `MAX_FILESIZE`
+decriptor at snapshot creation time. If the table already defines `MAX_FILESIZE` descriptor,
+this property would be ignored and have no effect.
+
+----
+snapshot 'table01', 'snap01', {MAX_FILESIZE => 21474836480}
+----
 
 .Enable/Disable Snapshot Auto Cleanup on running cluster:
 
@@ -3384,7 +3385,6 @@ Physical data size on disk is distinct from logical size of your data and is aff
   See <<regions.arch,regions.arch>>.
 
 * Decreased by <<compression,compression>> and data block encoding, depending on data.
-  See also link:http://search-hadoop.com/m/lL12B1PFVhp1[this thread].
   You might want to test what compression and encoding (if any) make sense for your data.
 * Increased by size of region server <<wal,wal>> (usually fixed and negligible - less than half of RS memory size, per RS).
 * Increased by HDFS replication - usually x3.

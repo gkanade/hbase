@@ -96,6 +96,15 @@ public class TestMetaRegionLocationCache {
     assertFalse(metaHRLs.isEmpty());
     ZKWatcher zk = master.getZooKeeper();
     List<String> metaZnodes = zk.getMetaReplicaNodes();
+    // Wait till all replicas available.
+    retries = 0;
+    while (master.getMetaRegionLocationCache().getMetaRegionLocations().get().size() !=
+        metaZnodes.size()) {
+      Thread.sleep(1000);
+      if (++retries == 10) {
+        break;
+      }
+    }
     assertEquals(metaZnodes.size(), metaHRLs.size());
     List<HRegionLocation> actualHRLs = getCurrentMetaLocations(zk);
     Collections.sort(metaHRLs);
@@ -109,6 +118,7 @@ public class TestMetaRegionLocationCache {
 
   @Test public void testStandByMetaLocations() throws Exception {
     HMaster standBy = TEST_UTIL.getMiniHBaseCluster().startMaster().getMaster();
+    standBy.isInitialized();
     verifyCachedMetaLocations(standBy);
   }
 

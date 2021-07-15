@@ -19,7 +19,6 @@
 package org.apache.hadoop.hbase.client;
 
 import edu.umd.cs.findbugs.annotations.CheckForNull;
-
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -27,7 +26,6 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.stream.Collectors;
-
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
@@ -37,8 +35,8 @@ import org.apache.hadoop.hbase.util.HashKey;
 import org.apache.hadoop.hbase.util.JenkinsHash;
 import org.apache.hadoop.hbase.util.MD5Hash;
 import org.apache.hadoop.io.DataInputBuffer;
+import org.apache.hadoop.io.IOUtils;
 import org.apache.yetus.audience.InterfaceAudience;
-
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
 
@@ -69,7 +67,15 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
  */
 @InterfaceAudience.Public
 public interface RegionInfo extends Comparable<RegionInfo> {
-  RegionInfo UNDEFINED = RegionInfoBuilder.newBuilder(TableName.valueOf("__UNDEFINED__")).build();
+  /**
+   * @deprecated since 2.3.2/3.0.0; to be removed in 4.0.0 with no replacement (for internal use).
+   */
+  @Deprecated
+  @InterfaceAudience.Private
+  // Not using RegionInfoBuilder intentionally to avoid a static loading deadlock: HBASE-24896
+  RegionInfo UNDEFINED = new MutableRegionInfo(0, TableName.valueOf("__UNDEFINED__"),
+    RegionInfo.DEFAULT_REPLICA_ID);
+
   /**
    * Separator used to demarcate the encodedName in a region name
    * in the new format. See description on new format above.
@@ -413,6 +419,20 @@ public interface RegionInfo extends Comparable<RegionInfo> {
     }
   }
 
+  static boolean isMD5Hash(String encodedRegionName) {
+    if (encodedRegionName.length() != MD5_HEX_LENGTH) {
+      return false;
+    }
+
+    for (int i = 0; i < encodedRegionName.length(); i++) {
+      char c = encodedRegionName.charAt(i);
+      if (!((c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f') || (c >= '0' && c <= '9'))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   /**
    * Check whether two regions are adjacent; i.e. lies just before or just
    * after in a table.
@@ -585,8 +605,9 @@ public interface RegionInfo extends Comparable<RegionInfo> {
    * @return the MOB {@link RegionInfo}.
    */
   static RegionInfo createMobRegionInfo(TableName tableName) {
-    return RegionInfoBuilder.newBuilder(tableName)
-        .setStartKey(Bytes.toBytes(".mob")).setRegionId(0).build();
+    // Skipping reference to RegionInfoBuilder in this class.
+    return new MutableRegionInfo(tableName, Bytes.toBytes(".mob"),
+      HConstants.EMPTY_END_ROW, false, 0, DEFAULT_REPLICA_ID, false);
   }
 
   /**
@@ -724,8 +745,7 @@ public interface RegionInfo extends Comparable<RegionInfo> {
     }
 
     //assumption: if Writable serialization, it should be longer than pblen.
-    int read = in.read(pbuf);
-    if (read != pblen) throw new IOException("read=" + read + ", wanted=" + pblen);
+    IOUtils.readFully(in, pbuf, 0, pblen);
     if (ProtobufUtil.isPBMagicPrefix(pbuf)) {
       return ProtobufUtil.toRegionInfo(HBaseProtos.RegionInfo.parseDelimitedFrom(in));
     } else {

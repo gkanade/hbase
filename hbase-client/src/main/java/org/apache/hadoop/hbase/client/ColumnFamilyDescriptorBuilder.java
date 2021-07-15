@@ -294,11 +294,6 @@ public class ColumnFamilyDescriptorBuilder {
     DEFAULT_VALUES.put(BLOCKCACHE, String.valueOf(DEFAULT_BLOCKCACHE));
     DEFAULT_VALUES.put(KEEP_DELETED_CELLS, String.valueOf(DEFAULT_KEEP_DELETED));
     DEFAULT_VALUES.put(DATA_BLOCK_ENCODING, String.valueOf(DEFAULT_DATA_BLOCK_ENCODING));
-    DEFAULT_VALUES.put(CACHE_DATA_ON_WRITE, String.valueOf(DEFAULT_CACHE_DATA_ON_WRITE));
-    DEFAULT_VALUES.put(CACHE_INDEX_ON_WRITE, String.valueOf(DEFAULT_CACHE_INDEX_ON_WRITE));
-    DEFAULT_VALUES.put(CACHE_BLOOMS_ON_WRITE, String.valueOf(DEFAULT_CACHE_BLOOMS_ON_WRITE));
-    DEFAULT_VALUES.put(EVICT_BLOCKS_ON_CLOSE, String.valueOf(DEFAULT_EVICT_BLOCKS_ON_CLOSE));
-    DEFAULT_VALUES.put(PREFETCH_BLOCKS_ON_OPEN, String.valueOf(DEFAULT_PREFETCH_BLOCKS_ON_OPEN));
     // Do NOT add this key/value by default. NEW_VERSION_BEHAVIOR is NOT defined in hbase1 so
     // it is not possible to make an hbase1 HCD the same as an hbase2 HCD and so the replication
     // compare of schemas will fail. It is OK not adding the below to the initial map because of
@@ -684,7 +679,7 @@ public class ColumnFamilyDescriptorBuilder {
      * @return this (for chained invocation)
      */
     private ModifyableColumnFamilyDescriptor setValue(Bytes key, Bytes value) {
-      if (value == null) {
+      if (value == null || value.getLength() == 0) {
         values.remove(key);
       } else {
         values.put(key, value);
@@ -1246,7 +1241,7 @@ public class ColumnFamilyDescriptorBuilder {
      * @return this (for chained invocation)
      */
     public ModifyableColumnFamilyDescriptor setConfiguration(String key, String value) {
-      if (value == null) {
+      if (value == null || value.length() == 0) {
         configuration.remove(key);
       } else {
         configuration.put(key, value);

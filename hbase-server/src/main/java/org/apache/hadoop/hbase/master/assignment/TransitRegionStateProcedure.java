@@ -123,7 +123,7 @@ public class TransitRegionStateProcedure
   public TransitRegionStateProcedure() {
   }
 
-  private void setInitalAndLastState() {
+  private void setInitialAndLastState() {
     switch (type) {
       case ASSIGN:
         initialState = RegionStateTransitionState.REGION_STATE_TRANSITION_GET_ASSIGN_CANDIDATE;
@@ -150,7 +150,7 @@ public class TransitRegionStateProcedure
     this.assignCandidate = assignCandidate;
     this.forceNewPlan = forceNewPlan;
     this.type = type;
-    setInitalAndLastState();
+    setInitialAndLastState();
 
     // when do reopen TRSP, let the rs know the targetServer so it can keep some info on close
     if (type == TransitionType.REOPEN) {
@@ -348,6 +348,7 @@ public class TransitRegionStateProcedure
               LOG.error(
                 "Cannot assign replica region {} because its primary region {} does not exist.",
                 regionNode.getRegionInfo(), defaultRI);
+              regionNode.unsetProcedure(this);
               return Flow.NO_MORE_STATE;
             }
           }
@@ -416,13 +417,8 @@ public class TransitRegionStateProcedure
 
   // Should be called with RegionStateNode locked
   public void serverCrashed(MasterProcedureEnv env, RegionStateNode regionNode,
-      ServerName serverName) throws IOException {
-    // force to assign to a new candidate server
-    // AssignmentManager#regionClosedAbnormally will set region location to null
-    // TODO: the forceNewPlan flag not be persistent so if master crash then the flag will be lost.
-    // But assign to old server is not big deal because it not effect correctness.
-    // See HBASE-23035 for more details.
-    forceNewPlan = true;
+      ServerName serverName, boolean forceNewPlan) throws IOException {
+    this.forceNewPlan = forceNewPlan;
     if (remoteProc != null) {
       // this means we are waiting for the sub procedure, so wake it up
       remoteProc.serverCrashed(env, regionNode, serverName);
@@ -519,7 +515,7 @@ public class TransitRegionStateProcedure
     RegionStateTransitionStateData data =
       serializer.deserialize(RegionStateTransitionStateData.class);
     type = convert(data.getType());
-    setInitalAndLastState();
+    setInitialAndLastState();
     forceNewPlan = data.getForceNewPlan();
     if (data.hasAssignCandidate()) {
       assignCandidate = ProtobufUtil.toServerName(data.getAssignCandidate());

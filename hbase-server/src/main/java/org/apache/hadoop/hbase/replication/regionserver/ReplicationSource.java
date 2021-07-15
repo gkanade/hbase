@@ -28,7 +28,6 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -86,7 +85,7 @@ public class ReplicationSource implements ReplicationSourceInterface {
   private static final Logger LOG = LoggerFactory.getLogger(ReplicationSource.class);
   // Queues of logs to process, entry in format of walGroupId->queue,
   // each presents a queue for one wal group
-  private Map<String, PriorityBlockingQueue<Path>> queues = new HashMap<>();
+  private Map<String, PriorityBlockingQueue<Path>> queues = new ConcurrentHashMap<>();
   // per group queue size, keep no more than this number of logs in each wal group
   protected int queueSizePerGroup;
   protected ReplicationQueueStorage queueStorage;
@@ -113,7 +112,7 @@ public class ReplicationSource implements ReplicationSourceInterface {
   // Maximum number of retries before taking bold actions
   private int maxRetriesMultiplier;
   // Indicates if this particular source is running
-  private volatile boolean sourceRunning = false;
+  volatile boolean sourceRunning = false;
   // Metrics for this source
   private MetricsSource metrics;
   // WARN threshold for the number of queued logs, defaults to 2
@@ -226,31 +225,12 @@ public class ReplicationSource implements ReplicationSourceInterface {
   public void addHFileRefs(TableName tableName, byte[] family, List<Pair<Path, Path>> pairs)
       throws ReplicationException {
     String peerId = replicationPeer.getId();
-    Set<String> namespaces = replicationPeer.getNamespaces();
-    Map<TableName, List<String>> tableCFMap = replicationPeer.getTableCFs();
-    if (tableCFMap != null) { // All peers with TableCFs
-      List<String> tableCfs = tableCFMap.get(tableName);
-      if (tableCFMap.containsKey(tableName)
-          && (tableCfs == null || tableCfs.contains(Bytes.toString(family)))) {
-        this.queueStorage.addHFileRefs(peerId, pairs);
-        metrics.incrSizeOfHFileRefsQueue(pairs.size());
-      } else {
-        LOG.debug("HFiles will not be replicated belonging to the table {} family {} to peer id {}",
-            tableName, Bytes.toString(family), peerId);
-      }
-    } else if (namespaces != null) { // Only for set NAMESPACES peers
-      if (namespaces.contains(tableName.getNamespaceAsString())) {
-        this.queueStorage.addHFileRefs(peerId, pairs);
-        metrics.incrSizeOfHFileRefsQueue(pairs.size());
-      } else {
-        LOG.debug("HFiles will not be replicated belonging to the table {} family {} to peer id {}",
-            tableName, Bytes.toString(family), peerId);
-      }
-    } else {
-      // user has explicitly not defined any table cfs for replication, means replicate all the
-      // data
+    if (replicationPeer.getPeerConfig().needToReplicate(tableName, family)) {
       this.queueStorage.addHFileRefs(peerId, pairs);
       metrics.incrSizeOfHFileRefsQueue(pairs.size());
+    } else {
+      LOG.debug("HFiles will not be replicated belonging to the table {} family {} to peer id {}",
+        tableName, Bytes.toString(family), peerId);
     }
   }
 
@@ -594,6 +574,9 @@ public class ReplicationSource implements ReplicationSourceInterface {
       }
     }
 
+    if (this.replicationEndpoint != null) {
+      this.replicationEndpoint.stop();
+    }
     for (ReplicationSourceShipper worker : workers) {
       if (worker.isAlive() || worker.entryReader.isAlive()) {
         try {
@@ -614,9 +597,6 @@ public class ReplicationSource implements ReplicationSourceInterface {
       }
     }
 
-    if (this.replicationEndpoint != null) {
-      this.replicationEndpoint.stop();
-    }
     if (join) {
       for (ReplicationSourceShipper worker : workers) {
         Threads.shutdown(worker, this.sleepForRetries);
@@ -735,7 +715,9 @@ public class ReplicationSource implements ReplicationSourceInterface {
       throttler.addPushSize(batchSize);
     }
     totalReplicatedEdits.addAndGet(entries.size());
-    totalBufferUsed.addAndGet(-batchSize);
+    long newBufferUsed = totalBufferUsed.addAndGet(-batchSize);
+    // Record the new buffer usage
+    this.manager.getGlobalMetrics().setWALReaderEditsBufferBytes(newBufferUsed);
   }
 
   @Override

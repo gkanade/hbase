@@ -269,6 +269,13 @@ public class HRegionServer extends Thread implements
   private final Cache<Long, Long> executedRegionProcedures =
       CacheBuilder.newBuilder().expireAfterAccess(600, TimeUnit.SECONDS).build();
 
+  /**
+   * Used to cache the moved-out regions
+   */
+  private final Cache<String, MovedRegionInfo> movedRegionInfoCache =
+      CacheBuilder.newBuilder().expireAfterWrite(movedRegionCacheExpiredTime(),
+        TimeUnit.MILLISECONDS).build();
+
   private MemStoreFlusher cacheFlusher;
 
   private HeapMemoryManager hMemManager;
@@ -472,11 +479,6 @@ public class HRegionServer extends Thread implements
    * Unique identifier for the cluster we are a part of.
    */
   protected String clusterId;
-
-  /**
-   * Chore to clean periodically the moved region list
-   */
-  private MovedRegionsCleaner movedRegionsCleaner;
 
   // chore for refreshing store files for secondary regions
   private StorefileRefresherChore storefileRefresher;
@@ -1079,10 +1081,6 @@ public class HRegionServer extends Thread implements
       mobFileCache.shutdown();
     }
 
-    if (movedRegionsCleaner != null) {
-      movedRegionsCleaner.stop("Region Server stopping");
-    }
-
     // Send interrupts to wake up threads if sleeping so they notice shutdown.
     // TODO: Should we check they are alive? If OOME could have exited already
     if (this.hMemManager != null) this.hMemManager.stop();
@@ -1628,14 +1626,16 @@ public class HRegionServer extends Thread implements
       long globalMemStoreSize = pair.getFirst();
       boolean offheap = this.regionServerAccounting.isOffheap();
       // When off heap memstore in use, take full area for chunk pool.
-      float poolSizePercentage = offheap? 1.0F:
-          conf.getFloat(MemStoreLAB.CHUNK_POOL_MAXSIZE_KEY, MemStoreLAB.POOL_MAX_SIZE_DEFAULT);
+      float poolSizePercentage = offheap ? 1.0F :
+        conf.getFloat(MemStoreLAB.CHUNK_POOL_MAXSIZE_KEY, MemStoreLAB.POOL_MAX_SIZE_DEFAULT);
       float initialCountPercentage = conf.getFloat(MemStoreLAB.CHUNK_POOL_INITIALSIZE_KEY,
-          MemStoreLAB.POOL_INITIAL_SIZE_DEFAULT);
+        MemStoreLAB.POOL_INITIAL_SIZE_DEFAULT);
       int chunkSize = conf.getInt(MemStoreLAB.CHUNK_SIZE_KEY, MemStoreLAB.CHUNK_SIZE_DEFAULT);
+      float indexChunkSizePercent = conf.getFloat(MemStoreLAB.INDEX_CHUNK_SIZE_PERCENTAGE_KEY,
+        MemStoreLAB.INDEX_CHUNK_SIZE_PERCENTAGE_DEFAULT);
       // init the chunkCreator
       ChunkCreator.initialize(chunkSize, offheap, globalMemStoreSize, poolSizePercentage,
-        initialCountPercentage, this.hMemManager);
+        initialCountPercentage, this.hMemManager, indexChunkSizePercent);
     }
   }
 
@@ -2007,13 +2007,24 @@ public class HRegionServer extends Thread implements
     Threads.setDaemonThreadRunning(this.procedureResultReporter,
       getName() + ".procedureResultReporter", uncaughtExceptionHandler);
 
-    if (this.compactionChecker != null) choreService.scheduleChore(compactionChecker);
-    if (this.periodicFlusher != null) choreService.scheduleChore(periodicFlusher);
-    if (this.healthCheckChore != null) choreService.scheduleChore(healthCheckChore);
-    if (this.nonceManagerChore != null) choreService.scheduleChore(nonceManagerChore);
-    if (this.storefileRefresher != null) choreService.scheduleChore(storefileRefresher);
-    if (this.movedRegionsCleaner != null) choreService.scheduleChore(movedRegionsCleaner);
-    if (this.fsUtilizationChore != null) choreService.scheduleChore(fsUtilizationChore);
+    if (this.compactionChecker != null) {
+      choreService.scheduleChore(compactionChecker);
+    }
+    if (this.periodicFlusher != null) {
+      choreService.scheduleChore(periodicFlusher);
+    }
+    if (this.healthCheckChore != null) {
+      choreService.scheduleChore(healthCheckChore);
+    }
+    if (this.nonceManagerChore != null) {
+      choreService.scheduleChore(nonceManagerChore);
+    }
+    if (this.storefileRefresher != null) {
+      choreService.scheduleChore(storefileRefresher);
+    }
+    if (this.fsUtilizationChore != null) {
+      choreService.scheduleChore(fsUtilizationChore);
+    }
     if (this.slowLogTableOpsChore != null) {
       choreService.scheduleChore(slowLogTableOpsChore);
     }
@@ -2068,9 +2079,6 @@ public class HRegionServer extends Thread implements
       final int duration = conf.getInt("hbase.slowlog.systable.chore.duration", 10 * 60 * 1000);
       slowLogTableOpsChore = new SlowLogTableOpsChore(this, duration, this.slowLogRecorder);
     }
-
-    // Create the thread to clean the moved regions list
-    movedRegionsCleaner = MovedRegionsCleaner.create(this);
 
     if (this.nonceManager != null) {
       // Create the scheduled chore that cleans up nonces.
@@ -2154,6 +2162,7 @@ public class HRegionServer extends Thread implements
         // auto bind enabled, try to use another port
         LOG.info("Failed binding http info server to port: " + port);
         port++;
+        LOG.info("Retry starting http info server with port: " + port);
       }
     }
     port = this.infoServer.getPort();
@@ -2570,7 +2579,6 @@ public class HRegionServer extends Thread implements
       choreService.cancelChore(periodicFlusher);
       choreService.cancelChore(healthCheckChore);
       choreService.cancelChore(storefileRefresher);
-      choreService.cancelChore(movedRegionsCleaner);
       choreService.cancelChore(fsUtilizationChore);
       choreService.cancelChore(slowLogTableOpsChore);
       // clean up the remaining scheduled chores (in case we missed out any)
@@ -3439,12 +3447,10 @@ public class HRegionServer extends Thread implements
   private static class MovedRegionInfo {
     private final ServerName serverName;
     private final long seqNum;
-    private final long moveTime;
 
     MovedRegionInfo(ServerName serverName, long closeSeqNum) {
       this.serverName = serverName;
       this.seqNum = closeSeqNum;
-      this.moveTime = EnvironmentEdgeManager.currentTime();
      }
 
     public ServerName getServerName() {
@@ -3454,17 +3460,7 @@ public class HRegionServer extends Thread implements
     public long getSeqNum() {
       return seqNum;
     }
-
-    long getMoveTime() {
-      return moveTime;
-    }
   }
-
-  /**
-   * This map will contains all the regions that we closed for a move.
-   * We add the time it was moved as we don't want to keep too old information
-   */
-  private Map<String, MovedRegionInfo> movedRegions = new ConcurrentHashMap<>(3000);
 
   /**
    * We need a timeout. If not there is a risk of giving a wrong information: this would double
@@ -3479,84 +3475,21 @@ public class HRegionServer extends Thread implements
     }
     LOG.info("Adding " + encodedName + " move to " + destination + " record at close sequenceid=" +
         closeSeqNum);
-    movedRegions.put(encodedName, new MovedRegionInfo(destination, closeSeqNum));
+    movedRegionInfoCache.put(encodedName, new MovedRegionInfo(destination, closeSeqNum));
   }
 
   void removeFromMovedRegions(String encodedName) {
-    movedRegions.remove(encodedName);
+    movedRegionInfoCache.invalidate(encodedName);
   }
 
-  private MovedRegionInfo getMovedRegion(final String encodedRegionName) {
-    MovedRegionInfo dest = movedRegions.get(encodedRegionName);
-
-    long now = EnvironmentEdgeManager.currentTime();
-    if (dest != null) {
-      if (dest.getMoveTime() > (now - TIMEOUT_REGION_MOVED)) {
-        return dest;
-      } else {
-        movedRegions.remove(encodedRegionName);
-      }
-    }
-
-    return null;
+  @VisibleForTesting
+  public MovedRegionInfo getMovedRegion(String encodedRegionName) {
+    return movedRegionInfoCache.getIfPresent(encodedRegionName);
   }
 
-  /**
-   * Remove the expired entries from the moved regions list.
-   */
-  protected void cleanMovedRegions() {
-    final long cutOff = System.currentTimeMillis() - TIMEOUT_REGION_MOVED;
-
-    movedRegions.entrySet().removeIf(e -> e.getValue().getMoveTime() < cutOff);
-  }
-
-  /*
-   * Use this to allow tests to override and schedule more frequently.
-   */
-
-  protected int movedRegionCleanerPeriod() {
+  @VisibleForTesting
+  public int movedRegionCacheExpiredTime() {
         return TIMEOUT_REGION_MOVED;
-  }
-
-  /**
-   * Creates a Chore thread to clean the moved region cache.
-   */
-  protected final static class MovedRegionsCleaner extends ScheduledChore implements Stoppable {
-    private HRegionServer regionServer;
-    Stoppable stoppable;
-
-    private MovedRegionsCleaner(
-      HRegionServer regionServer, Stoppable stoppable){
-      super("MovedRegionsCleaner for region " + regionServer, stoppable,
-          regionServer.movedRegionCleanerPeriod());
-      this.regionServer = regionServer;
-      this.stoppable = stoppable;
-    }
-
-    static MovedRegionsCleaner create(HRegionServer rs){
-      Stoppable stoppable = new Stoppable() {
-        private volatile boolean isStopped = false;
-        @Override public void stop(String why) { isStopped = true;}
-        @Override public boolean isStopped() {return isStopped;}
-      };
-
-      return new MovedRegionsCleaner(rs, stoppable);
-    }
-
-    @Override
-    protected void chore() {
-      regionServer.cleanMovedRegions();
-    }
-
-    @Override
-    public void stop(String why) {
-      stoppable.stop(why);
-    }
-
-    @Override
-    public boolean isStopped() {
-      return stoppable.isStopped();
-    }
   }
 
   private String getMyEphemeralNodePath() {
@@ -3777,6 +3710,9 @@ public class HRegionServer extends Thread implements
   @Override
   public boolean reportFileArchivalForQuotas(TableName tableName,
       Collection<Entry<String, Long>> archivedFiles) {
+    if (TEST_SKIP_REPORTING_TRANSITION) {
+      return false;
+    }
     RegionServerStatusService.BlockingInterface rss = rssStub;
     if (rss == null || rsSpaceQuotaManager == null) {
       // the current server could be stopping.

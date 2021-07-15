@@ -113,6 +113,7 @@ public class MasterProcedureTestingUtility {
           AssignmentManager am = env.getAssignmentManager();
           try {
             am.joinCluster();
+            am.wakeMetaLoadedEvent();
             master.setInitialized(true);
           } catch (Exception e) {
             LOG.warn("Failed to load meta", e);
@@ -264,7 +265,7 @@ public class MasterProcedureTestingUtility {
           if (location == null) continue;
           ServerName serverName = location.getServerName();
           // Make sure that regions are assigned to server
-          if (serverName != null && serverName.getHostAndPort() != null) {
+          if (serverName != null && serverName.getAddress() != null) {
             actualRegCount.incrementAndGet();
           }
         }

@@ -155,6 +155,9 @@ public class ReplicationSourceManager implements ReplicationListener {
 
 
   private AtomicLong totalBufferUsed = new AtomicLong();
+  // Total buffer size on this RegionServer for holding batched edits to be shipped.
+  private final long totalBufferLimit;
+  private final MetricsReplicationGlobalSourceSource globalMetrics;
 
   /**
    * Creates a replication manager and sets the watch on all the other registered region servers
@@ -171,7 +174,8 @@ public class ReplicationSourceManager implements ReplicationListener {
   public ReplicationSourceManager(ReplicationQueueStorage queueStorage,
       ReplicationPeers replicationPeers, ReplicationTracker replicationTracker, Configuration conf,
       Server server, FileSystem fs, Path logDir, Path oldLogDir, UUID clusterId,
-      WALFileLengthProvider walFileLengthProvider) throws IOException {
+      WALFileLengthProvider walFileLengthProvider,
+      MetricsReplicationGlobalSourceSource globalMetrics) throws IOException {
     // CopyOnWriteArrayList is thread-safe.
     // Generally, reading is more than modifying.
     this.sources = new ConcurrentHashMap<>();
@@ -205,6 +209,9 @@ public class ReplicationSourceManager implements ReplicationListener {
     this.latestPaths = new HashSet<Path>();
     replicationForBulkLoadDataEnabled = conf.getBoolean(HConstants.REPLICATION_BULKLOAD_ENABLE_KEY,
       HConstants.REPLICATION_BULKLOAD_ENABLE_DEFAULT);
+    this.totalBufferLimit = conf.getLong(HConstants.REPLICATION_SOURCE_TOTAL_BUFFER_KEY,
+        HConstants.REPLICATION_SOURCE_TOTAL_BUFFER_DFAULT);
+    this.globalMetrics = globalMetrics;
   }
 
   /**
@@ -236,8 +243,7 @@ public class ReplicationSourceManager implements ReplicationListener {
     if (currentReplicators == null || currentReplicators.isEmpty()) {
       return;
     }
-    List<ServerName> otherRegionServers = replicationTracker.getListOfRegionServers().stream()
-        .map(ServerName::valueOf).collect(Collectors.toList());
+    List<ServerName> otherRegionServers = replicationTracker.getListOfRegionServers();
     LOG.info(
       "Current list of replicators: " + currentReplicators + " other RSs: " + otherRegionServers);
 
@@ -410,17 +416,12 @@ public class ReplicationSourceManager implements ReplicationListener {
         }
       }
       for (String queueId : previousQueueIds) {
-        ReplicationSourceInterface replicationSource = createSource(queueId, peer);
-        this.oldsources.add(replicationSource);
-        LOG.trace("Added source for recovered queue: " + src.getQueueId());
+        ReplicationSourceInterface recoveredReplicationSource = createSource(queueId, peer);
+        this.oldsources.add(recoveredReplicationSource);
         for (SortedSet<String> walsByGroup : walsByIdRecoveredQueues.get(queueId).values()) {
-          walsByGroup.forEach(wal -> {
-            LOG.trace("Enqueueing log from recovered queue for source: {}",
-              src.getQueueId());
-            src.enqueueLog(new Path(wal));
-          });
+          walsByGroup.forEach(wal -> recoveredReplicationSource.enqueueLog(new Path(wal)));
         }
-        toStartup.add(replicationSource);
+        toStartup.add(recoveredReplicationSource);
       }
     }
     for (ReplicationSourceInterface replicationSource : toStartup) {
@@ -811,6 +812,9 @@ public class ReplicationSourceManager implements ReplicationListener {
     for (ReplicationSourceInterface source : this.sources.values()) {
       source.terminate("Region server is closing");
     }
+    for (ReplicationSourceInterface source : this.oldsources) {
+      source.terminate("Region server is closing");
+    }
   }
 
   /**
@@ -880,6 +884,14 @@ public class ReplicationSourceManager implements ReplicationListener {
   }
 
   /**
+   * Returns the maximum size in bytes of edits held in memory which are pending replication
+   * across all sources inside this RegionServer.
+   */
+  public long getTotalBufferLimit() {
+    return totalBufferLimit;
+  }
+
+  /**
    * Get the directory where wals are archived
    * @return the directory where wals are archived
    */
@@ -916,6 +928,10 @@ public class ReplicationSourceManager implements ReplicationListener {
    */
   public String getStats() {
     StringBuilder stats = new StringBuilder();
+    // Print stats that apply across all Replication Sources
+    stats.append("Global stats: ");
+    stats.append("WAL Edits Buffer Used=").append(getTotalBufferUsed().get()).append("B, Limit=")
+        .append(getTotalBufferLimit()).append("B\n");
     for (ReplicationSourceInterface source : this.sources.values()) {
       stats.append("Normal source for cluster " + source.getPeerId() + ": ");
       stats.append(source.getStats() + "\n");
@@ -940,5 +956,9 @@ public class ReplicationSourceManager implements ReplicationListener {
 
   int activeFailoverTaskCount() {
     return executor.getActiveCount();
+  }
+
+  MetricsReplicationGlobalSourceSource getGlobalMetrics() {
+    return this.globalMetrics;
   }
 }

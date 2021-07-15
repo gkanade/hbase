@@ -318,7 +318,7 @@ public class FSHLog extends AbstractFSWAL<Writer> {
     SyncFuture syncFuture = null;
     SafePointZigZagLatch zigzagLatch = null;
     long sequence = -1L;
-    if (this.ringBufferEventHandler != null) {
+    if (this.writer != null && this.ringBufferEventHandler != null) {
       // Get sequence first to avoid dead lock when ring buffer is full
       // Considering below sequence
       // 1. replaceWriter is called and zigzagLatch is initialized
@@ -596,8 +596,12 @@ public class FSHLog extends AbstractFSWAL<Writer> {
           Throwable lastException = null;
           try {
             TraceUtil.addTimelineAnnotation("syncing writer");
+            long unSyncedFlushSeq = highestUnsyncedTxid;
             writer.sync(sf.isForceSync());
             TraceUtil.addTimelineAnnotation("writer synced");
+            if (unSyncedFlushSeq > currentSequence) {
+              currentSequence = unSyncedFlushSeq;
+            }
             currentSequence = updateHighestSyncedSequence(currentSequence);
           } catch (IOException e) {
             LOG.error("Error syncing, request close of WAL", e);
@@ -834,8 +838,9 @@ public class FSHLog extends AbstractFSWAL<Writer> {
     private volatile CountDownLatch safePointReleasedLatch = new CountDownLatch(1);
 
     private void checkIfSyncFailed(SyncFuture syncFuture) throws FailedSyncBeforeLogCloseException {
-      if (syncFuture.isThrowable()) {
-        throw new FailedSyncBeforeLogCloseException(syncFuture.getThrowable());
+      Throwable t = syncFuture.getThrowable();
+      if (t != null) {
+        throw new FailedSyncBeforeLogCloseException(t);
       }
     }
 
@@ -853,6 +858,14 @@ public class FSHLog extends AbstractFSWAL<Writer> {
       }
       checkIfSyncFailed(syncFuture);
       return syncFuture;
+    }
+
+    /**
+     * @return if the safepoint has been attained.
+     */
+    @InterfaceAudience.Private
+    boolean isSafePointAttained() {
+      return this.safePointAttainedLatch.getCount() == 0;
     }
 
     /**
@@ -940,6 +953,16 @@ public class FSHLog extends AbstractFSWAL<Writer> {
       // There could be handler-count syncFutures outstanding.
       for (int i = 0; i < this.syncFuturesCount.get(); i++) {
         this.syncFutures[i].done(sequence, e);
+      }
+      offerDoneSyncsBackToCache();
+    }
+
+    /**
+     * Offers the finished syncs back to the cache for reuse.
+     */
+    private void offerDoneSyncsBackToCache() {
+      for (int i = 0; i < this.syncFuturesCount.get(); i++) {
+        syncFutureCache.offer(syncFutures[i]);
       }
       this.syncFuturesCount.set(0);
     }
@@ -1055,7 +1078,10 @@ public class FSHLog extends AbstractFSWAL<Writer> {
               ? this.exception : new DamagedWALException("On sync", this.exception));
         }
         attainSafePoint(sequence);
-        this.syncFuturesCount.set(0);
+        // It is critical that we offer the futures back to the cache for reuse here after the
+        // safe point is attained and all the clean up has been done. There have been
+        // issues with reusing sync futures early causing WAL lockups, see HBASE-25984.
+        offerDoneSyncsBackToCache();
       } catch (Throwable t) {
         LOG.error("UNEXPECTED!!! syncFutures.length=" + this.syncFutures.length, t);
       }

@@ -31,7 +31,6 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
-import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.replication.WALEntryFilter;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.Threads;
@@ -104,8 +103,7 @@ class ReplicationSourceWALReader extends Thread {
     // the +1 is for the current thread reading before placing onto the queue
     int batchCount = conf.getInt("replication.source.nb.batches", 1);
     this.totalBufferUsed = source.getSourceManager().getTotalBufferUsed();
-    this.totalBufferQuota = conf.getLong(HConstants.REPLICATION_SOURCE_TOTAL_BUFFER_KEY,
-      HConstants.REPLICATION_SOURCE_TOTAL_BUFFER_DFAULT);
+    this.totalBufferQuota = source.getSourceManager().getTotalBufferLimit();
     this.sleepForRetries =
         this.conf.getLong("replication.source.sleepforretries", 1000);    // 1 second
     this.maxRetriesMultiplier =
@@ -148,15 +146,17 @@ class ReplicationSourceWALReader extends Thread {
             entryStream.reset(); // reuse stream
           }
         }
-      } catch (IOException e) { // stream related
-        if (sleepMultiplier < maxRetriesMultiplier) {
-          LOG.debug("Failed to read stream of replication entries: " + e);
-          sleepMultiplier++;
+      } catch (WALEntryFilterRetryableException | IOException e) { // stream related
+        if (handleEofException(e)) {
+          sleepMultiplier = 1;
         } else {
-          LOG.error("Failed to read stream of replication entries", e);
-          handleEofException(e);
+          LOG.warn("Failed to read stream of replication entries "
+            + "or replication filter is recovering", e);
+          if (sleepMultiplier < maxRetriesMultiplier) {
+            sleepMultiplier ++;
+          }
+          Threads.sleep(sleepForRetries * sleepMultiplier);
         }
-        Threads.sleep(sleepForRetries * sleepMultiplier);
       } catch (InterruptedException e) {
         LOG.trace("Interrupted while sleeping between WAL reads");
         Thread.currentThread().interrupt();
@@ -175,7 +175,7 @@ class ReplicationSourceWALReader extends Thread {
         entry.getKey().getWriteTime(), entry.getKey(), this.source.getQueueId());
     long entrySize = getEntrySizeIncludeBulkLoad(entry);
     long entrySizeExcludeBulkLoad = getEntrySizeExcludeBulkLoad(entry);
-    batch.addEntry(entry);
+    batch.addEntry(entry, entrySize);
     updateBatchStats(batch, entry, entrySize);
     boolean totalBufferTooLarge = acquireBufferQuota(entrySizeExcludeBulkLoad);
 
@@ -243,22 +243,29 @@ class ReplicationSourceWALReader extends Thread {
     }
   }
 
-  // if we get an EOF due to a zero-length log, and there are other logs in queue
-  // (highly likely we've closed the current log), we've hit the max retries, and autorecovery is
-  // enabled, then dump the log
-  private void handleEofException(IOException e) {
+  /**
+   * if we get an EOF due to a zero-length log, and there are other logs in queue
+   * (highly likely we've closed the current log), and autorecovery is
+   * enabled, then dump the log
+   * @return true only the IOE can be handled
+   */
+  private boolean handleEofException(Exception e) {
+    // Dump the log even if logQueue size is 1 if the source is from recovered Source
+    // since we don't add current log to recovered source queue so it is safe to remove.
     if ((e instanceof EOFException || e.getCause() instanceof EOFException) &&
-      logQueue.size() > 1 && this.eofAutoRecovery) {
+      (source.isRecovered() || logQueue.size() > 1) && this.eofAutoRecovery) {
       try {
         if (fs.getFileStatus(logQueue.peek()).getLen() == 0) {
-          LOG.warn("Forcing removal of 0 length log in queue: " + logQueue.peek());
+          LOG.warn("Forcing removal of 0 length log in queue: {}", logQueue.peek());
           logQueue.remove();
           currentPosition = 0;
+          return true;
         }
       } catch (IOException ioe) {
-        LOG.warn("Couldn't get file length information about log " + logQueue.peek());
+        LOG.warn("Couldn't get file length information about log {}", logQueue.peek());
       }
     }
+    return false;
   }
 
   public Path getCurrentPath() {
@@ -275,6 +282,8 @@ class ReplicationSourceWALReader extends Thread {
   private boolean checkQuota() {
     // try not to go over total quota
     if (totalBufferUsed.get() > totalBufferQuota) {
+      LOG.warn("peer={}, can't read more edits from WAL as buffer usage {}B exceeds limit {}B",
+          this.source.getPeerId(), totalBufferUsed.get(), totalBufferQuota);
       Threads.sleep(sleepForRetries);
       return false;
     }
@@ -310,9 +319,7 @@ class ReplicationSourceWALReader extends Thread {
 
   private long getEntrySizeIncludeBulkLoad(Entry entry) {
     WALEdit edit = entry.getEdit();
-    WALKey key = entry.getKey();
-    return edit.heapSize() + sizeOfStoreFilesIncludeBulkLoad(edit) +
-        key.estimatedSerializedSizeOf();
+    return  getEntrySizeExcludeBulkLoad(entry) + sizeOfStoreFilesIncludeBulkLoad(edit);
   }
 
   public static long getEntrySizeExcludeBulkLoad(Entry entry) {
@@ -405,7 +412,10 @@ class ReplicationSourceWALReader extends Thread {
    * @return true if we should clear buffer and push all
    */
   private boolean acquireBufferQuota(long size) {
-    return totalBufferUsed.addAndGet(size) >= totalBufferQuota;
+    long newBufferUsed = totalBufferUsed.addAndGet(size);
+    // Record the new buffer usage
+    this.source.getSourceManager().getGlobalMetrics().setWALReaderEditsBufferBytes(newBufferUsed);
+    return newBufferUsed >= totalBufferQuota;
   }
 
   /**

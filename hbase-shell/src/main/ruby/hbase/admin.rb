@@ -454,7 +454,7 @@ module Hbase
           File.foreach(splits_file) do |line|
             arg[SPLITS].push(line.chomp)
           end
-          htd.setValue(SPLITS_FILE, arg[SPLITS_FILE])
+          htd.setValue(SPLITS_FILE, splits_file)
         end
 
         if arg.key?(SPLITS)
@@ -1094,6 +1094,9 @@ module Hbase
           ttl = ttl ? ttl.to_java(:long) : -1
           snapshot_props = java.util.HashMap.new
           snapshot_props.put("TTL", ttl)
+          max_filesize = arg[MAX_FILESIZE]
+          max_filesize = max_filesize ? max_filesize.to_java(:long) : -1
+          snapshot_props.put("MAX_FILESIZE", max_filesize)
           if arg[SKIP_FLUSH] == true
             @admin.snapshot(snapshot_name, table_name,
                             org.apache.hadoop.hbase.client.SnapshotType::SKIPFLUSH, snapshot_props)
@@ -1325,6 +1328,16 @@ module Hbase
         end
       end
       @admin.modifyNamespace(nsb.build)
+    end
+
+    #----------------------------------------------------------------------------------------------
+    # Get namespace's rsgroup
+    def get_namespace_rsgroup(namespace_name)
+      # Fail if namespace name is not a string
+      raise(ArgumentError, 'Namespace name must be of type String') unless namespace_name.is_a?(String)
+      nsd = @admin.getNamespaceDescriptor(namespace_name)
+      raise(ArgumentError, 'Namespace does not exist') unless nsd
+      nsd.getConfigurationValue("hbase.rsgroup.name")
     end
 
     #----------------------------------------------------------------------------------------------

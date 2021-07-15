@@ -29,6 +29,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.CellScanner;
+import org.apache.hadoop.hbase.CompatibilitySingletonFactory;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.Server;
 import org.apache.hadoop.hbase.TableName;
@@ -72,6 +73,7 @@ public class Replication implements ReplicationSourceService, ReplicationSinkSer
   private int statsThreadPeriod;
   // ReplicationLoad to access replication metrics
   private ReplicationLoad replicationLoad;
+  private MetricsReplicationGlobalSourceSource globalMetricsSource;
 
   private PeerProcedureHandler peerProcedureHandler;
 
@@ -119,9 +121,12 @@ public class Replication implements ReplicationSourceService, ReplicationSinkSer
     } catch (KeeperException ke) {
       throw new IOException("Could not read cluster id", ke);
     }
+    this.globalMetricsSource = CompatibilitySingletonFactory
+        .getInstance(MetricsReplicationSourceFactory.class).getGlobalSource();
     this.replicationManager = new ReplicationSourceManager(queueStorage, replicationPeers, replicationTracker, conf,
       this.server, fs, logDir, oldLogDir, clusterId,
-        walProvider != null ? walProvider.getWALFileLengthProvider() : p -> OptionalLong.empty());
+        walProvider != null ? walProvider.getWALFileLengthProvider() : p -> OptionalLong.empty(),
+        globalMetricsSource);
     if (walProvider != null) {
       walProvider
         .addWALActionsListener(new ReplicationSourceWALActionListener(conf, replicationManager));
@@ -187,7 +192,7 @@ public class Replication implements ReplicationSourceService, ReplicationSinkSer
   @Override
   public void startReplicationService() throws IOException {
     this.replicationManager.init();
-    this.replicationSink = new ReplicationSink(this.conf, this.server);
+    this.replicationSink = new ReplicationSink(this.conf);
     this.scheduleThreadPool.scheduleAtFixedRate(
       new ReplicationStatisticsTask(this.replicationSink, this.replicationManager),
       statsThreadPeriod, statsThreadPeriod, TimeUnit.SECONDS);

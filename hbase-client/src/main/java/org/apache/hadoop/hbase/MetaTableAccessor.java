@@ -285,7 +285,9 @@ public class MetaTableAccessor {
       parsedInfo = parseRegionInfoFromRegionName(regionName);
       row = getMetaKeyForRegion(parsedInfo);
     } catch (Exception parseEx) {
-      // Ignore. This is used with tableName passed as regionName.
+      // If it is not a valid regionName(i.e, tableName), it needs to return null here
+      // as querying meta table wont help.
+      return null;
     }
     Get get = new Get(row);
     get.addFamily(HConstants.CATALOG_FAMILY);
@@ -332,12 +334,7 @@ public class MetaTableAccessor {
     long regionId = Long.parseLong(Bytes.toString(fields[2]));
     int replicaId = fields.length > 3 ? Integer.parseInt(Bytes.toString(fields[3]), 16) : 0;
     return RegionInfoBuilder.newBuilder(TableName.valueOf(fields[0]))
-              .setStartKey(fields[1])
-              .setEndKey(fields[2])
-              .setSplit(false)
-              .setRegionId(regionId)
-              .setReplicaId(replicaId)
-              .build();
+      .setStartKey(fields[1]).setRegionId(regionId).setReplicaId(replicaId).build();
   }
 
   /**
@@ -368,8 +365,10 @@ public class MetaTableAccessor {
       new SubstringComparator(regionEncodedName));
     Scan scan = getMetaScan(connection, 1);
     scan.setFilter(rowFilter);
-    ResultScanner resultScanner = getMetaHTable(connection).getScanner(scan);
-    return resultScanner.next();
+    try (Table table = getMetaHTable(connection);
+        ResultScanner resultScanner = table.getScanner(scan)) {
+      return resultScanner.next();
+    }
   }
 
   /**
@@ -383,8 +382,15 @@ public class MetaTableAccessor {
   }
 
   /**
-   * @return Deserialized values of <qualifier,regioninfo> pairs taken from column values that match
-   *   the regex 'info:merge.*' in array of <code>cells</code>.
+   * Check whether the given {@code regionName} has any 'info:merge*' columns.
+   */
+  public static boolean hasMergeRegions(Connection conn, byte[] regionName) throws IOException {
+    return hasMergeRegions(getRegionResult(conn, regionName).rawCells());
+  }
+
+  /**
+   * @return Deserialized values of &lt;qualifier,regioninfo&gt; pairs taken from column values that
+   *         match the regex 'info:merge.*' in array of <code>cells</code>.
    */
   @Nullable
   public static Map<String, RegionInfo> getMergeRegionsWithName(Cell [] cells) {
@@ -577,7 +583,6 @@ public class MetaTableAccessor {
    * @param tableName bytes of table's name
    * @return configured Scan object
    */
-  @Deprecated
   public static Scan getScanForTableName(Connection connection, TableName tableName) {
     // Start key is just the table name with delimiters
     byte[] startKey = getTableStartRowForMeta(tableName, QueryType.REGION);

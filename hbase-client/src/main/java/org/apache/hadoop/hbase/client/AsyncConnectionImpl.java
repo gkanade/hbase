@@ -189,6 +189,10 @@ class AsyncConnectionImpl implements AsyncConnection {
     if (closed) {
       return;
     }
+    LOG.info("Connection has been closed by {}.", Thread.currentThread().getName());
+    if(LOG.isDebugEnabled()){
+      logCallStack(Thread.currentThread().getStackTrace());
+    }
     IOUtils.closeQuietly(clusterStatusListener);
     IOUtils.closeQuietly(rpcClient);
     IOUtils.closeQuietly(registry);
@@ -197,6 +201,16 @@ class AsyncConnectionImpl implements AsyncConnection {
     }
     metrics.ifPresent(MetricsConnection::shutdown);
     closed = true;
+  }
+
+  private void logCallStack(StackTraceElement[] stackTraceElements) {
+    StringBuilder stackBuilder = new StringBuilder("Call stack:");
+    for (StackTraceElement element : stackTraceElements) {
+      stackBuilder.append("\n    at ");
+      stackBuilder.append(element);
+    }
+    stackBuilder.append("\n");
+    LOG.debug(stackBuilder.toString());
   }
 
   @Override
@@ -226,7 +240,7 @@ class AsyncConnectionImpl implements AsyncConnection {
 
   ClientService.Interface getRegionServerStub(ServerName serverName) throws IOException {
     return ConcurrentMapUtils.computeIfAbsentEx(rsStubs,
-      getStubKey(ClientService.Interface.class.getSimpleName(), serverName, hostnameCanChange),
+      getStubKey(ClientService.getDescriptor().getName(), serverName, hostnameCanChange),
       () -> createRegionServerStub(serverName));
   }
 
@@ -240,7 +254,7 @@ class AsyncConnectionImpl implements AsyncConnection {
 
   AdminService.Interface getAdminStub(ServerName serverName) throws IOException {
     return ConcurrentMapUtils.computeIfAbsentEx(adminSubs,
-      getStubKey(AdminService.Interface.class.getSimpleName(), serverName, hostnameCanChange),
+      getStubKey(AdminService.getDescriptor().getName(), serverName, hostnameCanChange),
       () -> createAdminServerStub(serverName));
   }
 

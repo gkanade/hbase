@@ -422,6 +422,29 @@ public class TestMetaTableAccessor {
         MetaTableAccessor.parseReplicaIdFromServerColumn(Bytes.toBytes(column6)));
   }
 
+  /**
+   * The info we can get from the regionName is: table name, start key, regionId, replicaId.
+   */
+  @Test
+  public void testParseRegionInfoFromRegionName() throws IOException  {
+    RegionInfo originalRegionInfo = RegionInfoBuilder.newBuilder(
+      TableName.valueOf(name.getMethodName())).setRegionId(999999L)
+      .setStartKey(Bytes.toBytes("2")).setEndKey(Bytes.toBytes("3"))
+      .setReplicaId(1).build();
+    RegionInfo newParsedRegionInfo = MetaTableAccessor
+      .parseRegionInfoFromRegionName(originalRegionInfo.getRegionName());
+    assertEquals("Parse TableName error", originalRegionInfo.getTable(),
+      newParsedRegionInfo.getTable());
+    assertEquals("Parse regionId error", originalRegionInfo.getRegionId(),
+      newParsedRegionInfo.getRegionId());
+    assertTrue("Parse startKey error", Bytes.equals(originalRegionInfo.getStartKey(),
+      newParsedRegionInfo.getStartKey()));
+    assertEquals("Parse replicaId error", originalRegionInfo.getReplicaId(),
+      newParsedRegionInfo.getReplicaId());
+    assertTrue("We can't parse endKey from regionName only",
+      Bytes.equals(HConstants.EMPTY_END_ROW, newParsedRegionInfo.getEndKey()));
+  }
+
   @Test
   public void testMetaReaderGetColumnMethods() {
     assertArrayEquals(HConstants.SERVER_QUALIFIER, MetaTableAccessor.getServerColumn(0));
@@ -508,7 +531,7 @@ public class TestMetaTableAccessor {
     Result result = meta.get(get);
     assertTrue(Bytes.equals(
       result.getValue(HConstants.CATALOG_FAMILY, MetaTableAccessor.getServerColumn(replicaId)),
-      Bytes.toBytes(serverName.getHostAndPort())));
+      Bytes.toBytes(serverName.getAddress().toString())));
     assertTrue(Bytes.equals(
       result.getValue(HConstants.CATALOG_FAMILY, MetaTableAccessor.getStartCodeColumn(replicaId)),
       Bytes.toBytes(serverName.getStartcode())));

@@ -287,15 +287,6 @@ public class RSRpcServices implements HBaseRPCErrorHandler,
    */
   private static final long DEFAULT_REGION_SERVER_RPC_MINIMUM_SCAN_TIME_LIMIT_DELTA = 10;
 
-  /**
-   * Number of rows in a batch operation above which a warning will be logged.
-   */
-  static final String BATCH_ROWS_THRESHOLD_NAME = "hbase.rpc.rows.warning.threshold";
-  /**
-   * Default value of {@link RSRpcServices#BATCH_ROWS_THRESHOLD_NAME}
-   */
-  static final int BATCH_ROWS_THRESHOLD_DEFAULT = 5000;
-
   /*
    * Whether to reject rows with size > threshold defined by
    * {@link RSRpcServices#BATCH_ROWS_THRESHOLD_NAME}
@@ -995,7 +986,8 @@ public class RSRpcServices implements HBaseRPCErrorHandler,
       while (cells.advance()) {
         int size = PrivateCellUtil.estimatedSerializedSizeOf(cells.current());
         if (size > r.maxCellSize) {
-          String msg = "Cell with size " + size + " exceeds limit of " + r.maxCellSize + " bytes";
+          String msg = "Cell[" + cells.current() + "] with size " + size
+            + " exceeds limit of " + r.maxCellSize + " bytes";
           LOG.debug(msg);
           throw new DoNotRetryIOException(msg);
         }
@@ -1258,7 +1250,8 @@ public class RSRpcServices implements HBaseRPCErrorHandler,
     final Configuration conf = rs.getConfiguration();
     this.ld = ld;
     regionServer = rs;
-    rowSizeWarnThreshold = conf.getInt(BATCH_ROWS_THRESHOLD_NAME, BATCH_ROWS_THRESHOLD_DEFAULT);
+    rowSizeWarnThreshold = conf.getInt(
+      HConstants.BATCH_ROWS_THRESHOLD_NAME, HConstants.BATCH_ROWS_THRESHOLD_DEFAULT);
     rejectRowsWithSizeOverThreshold =
       conf.getBoolean(REJECT_BATCH_ROWS_OVER_THRESHOLD, DEFAULT_REJECT_BATCH_ROWS_OVER_THRESHOLD);
 
@@ -1742,21 +1735,18 @@ public class RSRpcServices implements HBaseRPCErrorHandler,
   @Override
   public CompactionSwitchResponse compactionSwitch(RpcController controller,
       CompactionSwitchRequest request) throws ServiceException {
-    try {
-      checkOpen();
-      requestCount.increment();
-      boolean prevState = regionServer.compactSplitThread.isCompactionsEnabled();
-      CompactionSwitchResponse response =
-          CompactionSwitchResponse.newBuilder().setPrevState(prevState).build();
-      if (prevState == request.getEnabled()) {
-        // passed in requested state is same as current state. No action required
-        return response;
-      }
-      regionServer.compactSplitThread.switchCompaction(request.getEnabled());
+    rpcPreCheck("compactionSwitch");
+    final CompactSplit compactSplitThread = regionServer.getCompactSplitThread();
+    requestCount.increment();
+    boolean prevState = compactSplitThread.isCompactionsEnabled();
+    CompactionSwitchResponse response =
+        CompactionSwitchResponse.newBuilder().setPrevState(prevState).build();
+    if (prevState == request.getEnabled()) {
+      // passed in requested state is same as current state. No action required
       return response;
-    } catch (IOException ie) {
-      throw new ServiceException(ie);
     }
+    compactSplitThread.switchCompaction(request.getEnabled());
+    return response;
   }
 
   /**
@@ -2397,6 +2387,7 @@ public class RSRpcServices implements HBaseRPCErrorHandler,
   @QosPriority(priority=HConstants.ADMIN_QOS)
   public StopServerResponse stopServer(final RpcController controller,
       final StopServerRequest request) throws ServiceException {
+    rpcPreCheck("stopServer");
     requestCount.increment();
     String reason = request.getReason();
     regionServer.stop(reason);
@@ -2406,6 +2397,7 @@ public class RSRpcServices implements HBaseRPCErrorHandler,
   @Override
   public UpdateFavoredNodesResponse updateFavoredNodes(RpcController controller,
       UpdateFavoredNodesRequest request) throws ServiceException {
+    rpcPreCheck("updateFavoredNodes");
     List<UpdateFavoredNodesRequest.RegionUpdateInfo> openInfoList = request.getUpdateInfoList();
     UpdateFavoredNodesResponse.Builder respBuilder = UpdateFavoredNodesResponse.newBuilder();
     for (UpdateFavoredNodesRequest.RegionUpdateInfo regionUpdateInfo : openInfoList) {
@@ -3070,7 +3062,8 @@ public class RSRpcServices implements HBaseRPCErrorHandler,
         switch (type) {
         case DELETE:
           if (request.hasCondition()) {
-            metricsRegionServer.updateCheckAndDelete(after - before);
+            metricsRegionServer.updateCheckAndDelete(
+                region == null ? null : region.getRegionInfo().getTable(), after - before);
           } else {
             metricsRegionServer.updateDelete(
                 region == null ? null : region.getRegionInfo().getTable(), after - before);
@@ -3078,10 +3071,11 @@ public class RSRpcServices implements HBaseRPCErrorHandler,
           break;
         case PUT:
           if (request.hasCondition()) {
-            metricsRegionServer.updateCheckAndPut(after - before);
+            metricsRegionServer.updateCheckAndPut(
+                region == null ? null : region.getRegionInfo().getTable(), after - before);
           } else {
             metricsRegionServer.updatePut(
-                region == null ? null : region.getRegionInfo().getTable(),after - before);
+                region == null ? null : region.getRegionInfo().getTable(), after - before);
           }
           break;
         default:
@@ -3262,10 +3256,13 @@ public class RSRpcServices implements HBaseRPCErrorHandler,
     // arbitrary 32. TODO: keep record of general size of results being returned.
     List<Cell> values = new ArrayList<>(32);
     region.startRegionOperation(Operation.SCAN);
+    long before = EnvironmentEdgeManager.currentTime();
+    // Used to check if we've matched the row limit set on the Scan
+    int numOfCompleteRows = 0;
+    // Count of times we call nextRaw; can be > numOfCompleteRows.
+    int numOfNextRawCalls = 0;
     try {
       int numOfResults = 0;
-      int numOfCompleteRows = 0;
-      long before = EnvironmentEdgeManager.currentTime();
       synchronized (scanner) {
         boolean stale = (region.getRegionInfo().getReplicaId() != 0);
         boolean clientHandlesPartials =
@@ -3321,6 +3318,7 @@ public class RSRpcServices implements HBaseRPCErrorHandler,
 
           // Collect values to be returned here
           moreRows = scanner.nextRaw(values, scannerContext);
+          numOfNextRawCalls++;
 
           if (!values.isEmpty()) {
             if (limitOfRows > 0) {
@@ -3412,18 +3410,21 @@ public class RSRpcServices implements HBaseRPCErrorHandler,
           builder.setScanMetrics(metricBuilder.build());
         }
       }
+    } finally {
+      region.closeRegionOperation();
+      // Update serverside metrics, even on error.
       long end = EnvironmentEdgeManager.currentTime();
       long responseCellSize = context != null ? context.getResponseCellSize() : 0;
       region.getMetrics().updateScanTime(end - before);
       final MetricsRegionServer metricsRegionServer = regionServer.getMetrics();
       if (metricsRegionServer != null) {
         metricsRegionServer.updateScanSize(
-            region.getTableDescriptor().getTableName(), responseCellSize);
+          region.getTableDescriptor().getTableName(), responseCellSize);
         metricsRegionServer.updateScanTime(
-            region.getTableDescriptor().getTableName(), end - before);
+          region.getTableDescriptor().getTableName(), end - before);
+        metricsRegionServer.updateReadQueryMeter(region.getRegionInfo().getTable(),
+          numOfNextRawCalls);
       }
-    } finally {
-      region.closeRegionOperation();
     }
     // coprocessor postNext hook
     if (region.getCoprocessorHost() != null) {
@@ -3708,6 +3709,7 @@ public class RSRpcServices implements HBaseRPCErrorHandler,
       RpcController controller, UpdateConfigurationRequest request)
       throws ServiceException {
     try {
+      requirePermission("updateConfiguration", Permission.Action.ADMIN);
       this.regionServer.updateConfiguration();
     } catch (Exception e) {
       throw new ServiceException(e);
@@ -3740,7 +3742,8 @@ public class RSRpcServices implements HBaseRPCErrorHandler,
 
   @Override
   public ClearRegionBlockCacheResponse clearRegionBlockCache(RpcController controller,
-      ClearRegionBlockCacheRequest request) {
+      ClearRegionBlockCacheRequest request) throws ServiceException {
+    rpcPreCheck("clearRegionBlockCache");
     ClearRegionBlockCacheResponse.Builder builder =
         ClearRegionBlockCacheResponse.newBuilder();
     CacheEvictionStatsBuilder stats = CacheEvictionStats.builder();
@@ -3882,7 +3885,8 @@ public class RSRpcServices implements HBaseRPCErrorHandler,
   @Override
   @QosPriority(priority = HConstants.ADMIN_QOS)
   public ClearSlowLogResponses clearSlowLogsResponses(final RpcController controller,
-    final ClearSlowLogResponseRequest request) {
+    final ClearSlowLogResponseRequest request) throws ServiceException {
+    rpcPreCheck("clearSlowLogsResponses");
     final SlowLogRecorder slowLogRecorder =
       this.regionServer.getSlowLogRecorder();
     boolean slowLogsCleaned = Optional.ofNullable(slowLogRecorder)

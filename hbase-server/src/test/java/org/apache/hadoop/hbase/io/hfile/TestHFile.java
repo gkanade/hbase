@@ -22,6 +22,7 @@ import static org.apache.hadoop.hbase.HConstants.BUCKET_CACHE_SIZE_KEY;
 import static org.apache.hadoop.hbase.io.ByteBuffAllocator.BUFFER_SIZE_KEY;
 import static org.apache.hadoop.hbase.io.ByteBuffAllocator.MAX_BUFFER_COUNT_KEY;
 import static org.apache.hadoop.hbase.io.ByteBuffAllocator.MIN_ALLOCATE_SIZE_KEY;
+import static org.apache.hadoop.hbase.io.hfile.BlockCacheFactory.BLOCKCACHE_POLICY_KEY;
 import static org.apache.hadoop.hbase.io.hfile.CacheConfig.EVICT_BLOCKS_ON_CLOSE_KEY;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -60,6 +61,7 @@ import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValue.Type;
 import org.apache.hadoop.hbase.KeyValueUtil;
+import org.apache.hadoop.hbase.MetaCellComparator;
 import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.Tag;
 import org.apache.hadoop.hbase.io.ByteBuffAllocator;
@@ -203,10 +205,11 @@ public class TestHFile  {
     lru.shutdown();
   }
 
-  private BlockCache initCombinedBlockCache() {
+  private BlockCache initCombinedBlockCache(final String l1CachePolicy) {
     Configuration that = HBaseConfiguration.create(conf);
     that.setFloat(BUCKET_CACHE_SIZE_KEY, 32); // 32MB for bucket cache.
     that.set(BUCKET_CACHE_IOENGINE_KEY, "offheap");
+    that.set(BLOCKCACHE_POLICY_KEY, l1CachePolicy);
     BlockCache bc = BlockCacheFactory.createBlockCache(that);
     Assert.assertNotNull(bc);
     Assert.assertTrue(bc instanceof CombinedBlockCache);
@@ -223,7 +226,7 @@ public class TestHFile  {
     fillByteBuffAllocator(alloc, bufCount);
     Path storeFilePath = writeStoreFile();
     // Open the file reader with CombinedBlockCache
-    BlockCache combined = initCombinedBlockCache();
+    BlockCache combined = initCombinedBlockCache("LRU");
     conf.setBoolean(EVICT_BLOCKS_ON_CLOSE_KEY, true);
     CacheConfig cacheConfig = new CacheConfig(conf, null, combined, alloc);
     HFile.Reader reader = HFile.createReader(fs, storeFilePath, cacheConfig, true, conf);
@@ -736,7 +739,7 @@ public class TestHFile  {
     // optimization done.
     left = CellUtil.createCell(Bytes.toBytes("g"), Bytes.toBytes("a"), Bytes.toBytes("a"));
     right = CellUtil.createCell(Bytes.toBytes("i"), Bytes.toBytes("a"), Bytes.toBytes("a"));
-    mid = HFileWriterImpl.getMidpoint(CellComparatorImpl.META_COMPARATOR, left, right);
+    mid = HFileWriterImpl.getMidpoint(MetaCellComparator.META_COMPARATOR, left, right);
     assertTrue(PrivateCellUtil.compareKeyIgnoresMvcc(CellComparatorImpl.COMPARATOR, left, mid) < 0);
     assertTrue(PrivateCellUtil.compareKeyIgnoresMvcc(CellComparatorImpl.COMPARATOR, mid, right) == 0);
 
@@ -788,7 +791,7 @@ public class TestHFile  {
     assertTrue(newKey.getTypeByte() == Type.Maximum.getCode());
 
     // verify metaKeyComparator's getShortMidpointKey output
-    final CellComparatorImpl metaKeyComparator = CellComparatorImpl.META_COMPARATOR;
+    final CellComparatorImpl metaKeyComparator = MetaCellComparator.META_COMPARATOR;
     kv1 = new KeyValue(Bytes.toBytes("ilovehbase123"), family, qualA, 5, Type.Put);
     kv2 = new KeyValue(Bytes.toBytes("ilovehbase234"), family, qualA, 0, Type.Put);
     newKey = HFileWriterImpl.getMidpoint(metaKeyComparator, kv1, kv2);
@@ -853,4 +856,64 @@ public class TestHFile  {
       writer.close();
     }
   }
+
+  /**
+   * Test case for CombinedBlockCache with TinyLfu as L1 cache
+   */
+  @Test
+  public void testReaderWithTinyLfuCombinedBlockCache() throws Exception {
+    testReaderCombinedCache("TinyLfu");
+  }
+
+  /**
+   * Test case for CombinedBlockCache with AdaptiveLRU as L1 cache
+   */
+  @Test
+  public void testReaderWithLruCombinedBlockCache() throws Exception {
+    testReaderCombinedCache("LRU");
+  }
+
+  private void testReaderCombinedCache(final String l1CachePolicy) throws Exception {
+    int bufCount = 1024;
+    int blockSize = 64 * 1024;
+    ByteBuffAllocator alloc = initAllocator(true, bufCount, blockSize, 0);
+    fillByteBuffAllocator(alloc, bufCount);
+    Path storeFilePath = writeStoreFile();
+    // Open the file reader with CombinedBlockCache
+    BlockCache combined = initCombinedBlockCache(l1CachePolicy);
+    conf.setBoolean(EVICT_BLOCKS_ON_CLOSE_KEY, true);
+    CacheConfig cacheConfig = new CacheConfig(conf, null, combined, alloc);
+    HFile.Reader reader = HFile.createReader(fs, storeFilePath, cacheConfig, true, conf);
+    long offset = 0;
+    Cacheable cachedBlock = null;
+    while (offset < reader.getTrailer().getLoadOnOpenDataOffset()) {
+      BlockCacheKey key = new BlockCacheKey(storeFilePath.getName(), offset);
+      HFileBlock block = reader.readBlock(offset, -1, true, true, false, true, null, null);
+      offset += block.getOnDiskSizeWithHeader();
+      // Read the cached block.
+      cachedBlock = combined.getBlock(key, false, false, true);
+      try {
+        Assert.assertNotNull(cachedBlock);
+        Assert.assertTrue(cachedBlock instanceof HFileBlock);
+        HFileBlock hfb = (HFileBlock) cachedBlock;
+        // Data block will be cached in BucketCache, so it should be an off-heap block.
+        if (hfb.getBlockType().isData()) {
+          Assert.assertTrue(hfb.isSharedMem());
+        } else if (!l1CachePolicy.equals("TinyLfu")) {
+          Assert.assertFalse(hfb.isSharedMem());
+        }
+      } finally {
+        cachedBlock.release();
+      }
+      block.release(); // return back the ByteBuffer back to allocator.
+    }
+    reader.close();
+    combined.shutdown();
+    if (cachedBlock != null) {
+      Assert.assertEquals(0, cachedBlock.refCnt());
+    }
+    Assert.assertEquals(bufCount, alloc.getFreeBufferCount());
+    alloc.clean();
+  }
+
 }

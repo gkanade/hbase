@@ -979,7 +979,7 @@ public class ProcedureExecutor<TEnvironment> {
       while (current != null) {
         LOG.debug("Bypassing {}", current);
         current.bypass(getEnvironment());
-        store.update(procedure);
+        store.update(current);
         long parentID = current.getParentProcId();
         current = getProcedure(parentID);
       }
@@ -1841,8 +1841,8 @@ public class ProcedureExecutor<TEnvironment> {
       // children have completed, move parent to front of the queue.
       store.update(parent);
       scheduler.addFront(parent);
-      LOG.info("Finished subprocedure pid={}, resume processing parent {}",
-          procedure.getProcId(), parent);
+      LOG.info("Finished subprocedure pid={}, resume processing ppid={}",
+        procedure.getProcId(), parent.getProcId());
       return;
     }
   }

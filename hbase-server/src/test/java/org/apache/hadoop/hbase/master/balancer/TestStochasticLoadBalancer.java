@@ -29,6 +29,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
+import java.util.TimeZone;
 import java.util.TreeMap;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.ClusterMetrics;
@@ -48,9 +49,12 @@ import org.apache.hadoop.hbase.master.balancer.StochasticLoadBalancer.ServerLoca
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+
+import org.apache.hbase.thirdparty.org.apache.commons.collections4.CollectionUtils;
 
 @Category({ MasterTests.class, MediumTests.class })
 public class TestStochasticLoadBalancer extends BalancerTestBase {
@@ -191,7 +195,7 @@ public class TestStochasticLoadBalancer extends BalancerTestBase {
     Configuration conf = HBaseConfiguration.create();
     MockNoopMasterServices master = new MockNoopMasterServices();
     StochasticLoadBalancer.CostFunction
-        costFunction = new ServerLocalityCostFunction(conf, master);
+        costFunction = new ServerLocalityCostFunction(conf);
 
     for (int test = 0; test < clusterRegionLocationMocks.length; test++) {
       int[][] clusterRegionLocations = clusterRegionLocationMocks[test];
@@ -214,9 +218,14 @@ public class TestStochasticLoadBalancer extends BalancerTestBase {
     assertEquals(StochasticLoadBalancer.MoveCostFunction.DEFAULT_MOVE_COST,
       costFunction.getMultiplier(), 0.01);
 
-    //In offpeak hours, the multiplier of move cost should be lower
+    // In offpeak hours, the multiplier of move cost should be lower
     conf.setInt("hbase.offpeak.start.hour",0);
     conf.setInt("hbase.offpeak.end.hour",23);
+    // Set a fixed time which hour is 15, so it will always in offpeak
+    // See HBASE-24898 for more info of the calculation here
+    long deltaFor15 = TimeZone.getDefault().getRawOffset() - 28800000;
+    long timeFor15 = 1597907081000L - deltaFor15;
+    EnvironmentEdgeManager.injectEdge(() -> timeFor15);
     costFunction = new StochasticLoadBalancer.MoveCostFunction(conf);
     costFunction.init(cluster);
     costFunction.cost();
@@ -348,34 +357,6 @@ public class TestStochasticLoadBalancer extends BalancerTestBase {
   }
 
   @Test
-  public void testCostFromArray() {
-    Configuration conf = HBaseConfiguration.create();
-    StochasticLoadBalancer.CostFromRegionLoadFunction
-        costFunction = new StochasticLoadBalancer.MemStoreSizeCostFunction(conf);
-    costFunction.init(mockCluster(new int[]{0, 0, 0, 0, 1}));
-
-    double[] statOne = new double[100];
-    for (int i =0; i < 100; i++) {
-      statOne[i] = 10;
-    }
-    assertEquals(0, costFunction.costFromArray(statOne), 0.01);
-
-    double[] statTwo= new double[101];
-    for (int i =0; i < 100; i++) {
-      statTwo[i] = 0;
-    }
-    statTwo[100] = 100;
-    assertEquals(1, costFunction.costFromArray(statTwo), 0.01);
-
-    double[] statThree = new double[200];
-    for (int i =0; i < 100; i++) {
-      statThree[i] = (0);
-      statThree[i+100] = 100;
-    }
-    assertEquals(0.5, costFunction.costFromArray(statThree), 0.01);
-  }
-
-  @Test
   public void testLosingRs() throws Exception {
     int numNodes = 3;
     int numRegions = 20;
@@ -408,13 +389,39 @@ public class TestStochasticLoadBalancer extends BalancerTestBase {
 
   @Test
   public void testAdditionalCostFunction() {
-    conf.set(StochasticLoadBalancer.COST_FUNCTIONS_COST_FUNCTIONS_KEY,
-            DummyCostFunction.class.getName());
+    try {
+      conf.set(StochasticLoadBalancer.COST_FUNCTIONS_COST_FUNCTIONS_KEY,
+        DummyCostFunction.class.getName());
 
-    loadBalancer.setConf(conf);
-    assertTrue(Arrays.
-            asList(loadBalancer.getCostFunctionNames()).
-            contains(DummyCostFunction.class.getSimpleName()));
+      loadBalancer.setConf(conf);
+      assertTrue(Arrays.
+        asList(loadBalancer.getCostFunctionNames()).
+        contains(DummyCostFunction.class.getSimpleName()));
+    } finally {
+      conf.unset(StochasticLoadBalancer.COST_FUNCTIONS_COST_FUNCTIONS_KEY);
+      loadBalancer.setConf(conf);
+    }
+  }
+
+  @Test
+  public void testDefaultCostFunctionList() {
+    List<String> expected = Arrays.asList(
+      StochasticLoadBalancer.RegionCountSkewCostFunction.class.getSimpleName(),
+      StochasticLoadBalancer.PrimaryRegionCountSkewCostFunction.class.getSimpleName(),
+      StochasticLoadBalancer.MoveCostFunction.class.getSimpleName(),
+      StochasticLoadBalancer.RackLocalityCostFunction.class.getSimpleName(),
+      StochasticLoadBalancer.TableSkewCostFunction.class.getSimpleName(),
+      StochasticLoadBalancer.RegionReplicaHostCostFunction.class.getSimpleName(),
+      StochasticLoadBalancer.RegionReplicaRackCostFunction.class.getSimpleName(),
+      StochasticLoadBalancer.ReadRequestCostFunction.class.getSimpleName(),
+      StochasticLoadBalancer.WriteRequestCostFunction.class.getSimpleName(),
+      StochasticLoadBalancer.MemStoreSizeCostFunction.class.getSimpleName(),
+      StochasticLoadBalancer.StoreFileCostFunction.class.getSimpleName()
+    );
+
+    List<String> actual = Arrays.asList(loadBalancer.getCostFunctionNames());
+    assertTrue("ExpectedCostFunctions: " + expected + " ActualCostFunctions: " + actual,
+      CollectionUtils.isEqualCollection(expected, actual));
   }
 
   private boolean needsBalanceIdleRegion(int[] cluster){

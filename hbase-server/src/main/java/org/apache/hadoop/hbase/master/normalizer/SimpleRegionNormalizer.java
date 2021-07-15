@@ -28,6 +28,7 @@ import java.util.function.BooleanSupplier;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.hadoop.hbase.RegionMetrics;
+import org.apache.hadoop.hbase.ServerMetrics;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.Size;
 import org.apache.hadoop.hbase.TableName;
@@ -239,14 +240,21 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       ctx.getTableRegions().size());
 
     final List<NormalizationPlan> plans = new ArrayList<>();
+    int splitPlansCount = 0;
     if (proceedWithSplitPlanning) {
-      plans.addAll(computeSplitNormalizationPlans(ctx));
+      List<NormalizationPlan> splitPlans = computeSplitNormalizationPlans(ctx);
+      splitPlansCount = splitPlans.size();
+      plans.addAll(splitPlans);
     }
+    int mergePlansCount = 0;
     if (proceedWithMergePlanning) {
-      plans.addAll(computeMergeNormalizationPlans(ctx));
+      List<NormalizationPlan> mergePlans = computeMergeNormalizationPlans(ctx);
+      mergePlansCount = mergePlans.size();
+      plans.addAll(mergePlans);
     }
 
-    LOG.debug("Computed {} normalization plans for table {}", plans.size(), table);
+    LOG.debug("Computed normalization plans for table {}. Total plans: {}, split plans: {}, " +
+        "merge plans: {}", table, plans.size(), splitPlansCount, mergePlansCount);
     return plans;
   }
 
@@ -256,8 +264,16 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
   private long getRegionSizeMB(RegionInfo hri) {
     ServerName sn =
       masterServices.getAssignmentManager().getRegionStates().getRegionServerOfRegion(hri);
-    RegionMetrics regionLoad =
-      masterServices.getServerManager().getLoad(sn).getRegionMetrics().get(hri.getRegionName());
+    if (sn == null) {
+      LOG.debug("{} region was not found on any Server", hri.getRegionNameAsString());
+      return -1;
+    }
+    ServerMetrics serverMetrics = masterServices.getServerManager().getLoad(sn);
+    if (serverMetrics == null) {
+      LOG.debug("server {} was not found in ServerManager", sn.getServerName());
+      return -1;
+    }
+    RegionMetrics regionLoad = serverMetrics.getRegionMetrics().get(hri.getRegionName());
     if (regionLoad == null) {
       LOG.debug("{} was not found in RegionsLoad", hri.getRegionNameAsString());
       return -1;
@@ -288,37 +304,38 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       throw new IllegalStateException(
         "Cannot calculate average size of a table without any regions.");
     }
-    final int regionCount = tableRegions.size();
-    final long totalSizeMb = tableRegions.stream()
-      .mapToLong(this::getRegionSizeMB)
-      .sum();
     TableName table = tableRegions.get(0).getTable();
     int targetRegionCount = -1;
     long targetRegionSize = -1;
+    double avgRegionSize;
     try {
       TableDescriptor tableDescriptor = masterServices.getTableDescriptors().get(table);
-      if (tableDescriptor != null && LOG.isDebugEnabled()) {
+      if (tableDescriptor != null) {
         targetRegionCount = tableDescriptor.getNormalizerTargetRegionCount();
         targetRegionSize = tableDescriptor.getNormalizerTargetRegionSize();
-        LOG.debug("Table {} configured with target region count {}, target region size {}", table,
-          targetRegionCount, targetRegionSize);
+        LOG.debug("Table {} configured with target region count {}, target region size {} MB",
+          table, targetRegionCount, targetRegionSize);
       }
     } catch (IOException e) {
       LOG.warn("TableDescriptor for {} unavailable, table-level target region count and size"
         + " configurations cannot be considered.", table, e);
     }
-
-    double avgRegionSize;
     if (targetRegionSize > 0) {
       avgRegionSize = targetRegionSize;
-    } else if (targetRegionCount > 0) {
-      avgRegionSize = totalSizeMb / (double) targetRegionCount;
     } else {
-      avgRegionSize = totalSizeMb / (double) regionCount;
+      final int regionCount = tableRegions.size();
+      final long totalSizeMb = tableRegions.stream()
+        .mapToLong(this::getRegionSizeMB)
+        .sum();
+      if (targetRegionCount > 0) {
+        avgRegionSize = totalSizeMb / (double) targetRegionCount;
+      } else {
+        avgRegionSize = totalSizeMb / (double) regionCount;
+      }
+      LOG.debug("Table {}, total aggregated regions size: {} MB and average region size {} MB",
+        table, totalSizeMb, String.format("%.3f", avgRegionSize));
     }
 
-    LOG.debug("Table {}, total aggregated regions size: {} and average region size {}", table,
-      totalSizeMb, avgRegionSize);
     return avgRegionSize;
   }
 
@@ -356,7 +373,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     }
 
     final double avgRegionSizeMb = ctx.getAverageRegionSizeMb();
-    LOG.debug("Computing normalization plan for table {}. average region size: {}, number of"
+    LOG.debug("Computing normalization plan for table {}. average region size: {} MB, number of"
       + " regions: {}.", ctx.getTableName(), avgRegionSizeMb, ctx.getTableRegions().size());
 
     final List<NormalizationPlan> plans = new ArrayList<>();
@@ -369,7 +386,8 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       }
       final long currentSizeMb = getRegionSizeMB(current);
       final long nextSizeMb = getRegionSizeMB(next);
-      if (currentSizeMb + nextSizeMb < avgRegionSizeMb) {
+      // always merge away empty regions when they present themselves.
+      if (currentSizeMb == 0 || nextSizeMb == 0 || currentSizeMb + nextSizeMb < avgRegionSizeMb) {
         plans.add(new MergeNormalizationPlan(current, next));
         candidateIdx++;
       }
@@ -400,7 +418,8 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
    */
   private List<NormalizationPlan> computeSplitNormalizationPlans(final NormalizeContext ctx) {
     final double avgRegionSize = ctx.getAverageRegionSizeMb();
-    LOG.debug("Table {}, average region size: {}", ctx.getTableName(), avgRegionSize);
+    LOG.debug("Table {}, average region size: {} MB", ctx.getTableName(),
+      String.format("%.3f", avgRegionSize));
 
     final List<NormalizationPlan> plans = new ArrayList<>();
     for (final RegionInfo hri : ctx.getTableRegions()) {
@@ -409,9 +428,10 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       }
       final long regionSize = getRegionSizeMB(hri);
       if (regionSize > 2 * avgRegionSize) {
-        LOG.info("Table {}, large region {} has size {}, more than twice avg size {}, splitting",
-          ctx.getTableName(), hri.getRegionNameAsString(), regionSize, avgRegionSize);
-        plans.add(new SplitNormalizationPlan(hri, null));
+        LOG.info("Table {}, large region {} has size {} MB, more than twice avg size {} MB, splitting",
+          ctx.getTableName(), hri.getRegionNameAsString(), regionSize,
+          String.format("%.3f", avgRegionSize));
+        plans.add(new SplitNormalizationPlan(hri));
       }
     }
     return plans;

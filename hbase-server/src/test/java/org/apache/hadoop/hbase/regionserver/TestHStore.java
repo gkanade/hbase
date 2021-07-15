@@ -78,6 +78,7 @@ import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.RegionInfoBuilder;
 import org.apache.hadoop.hbase.client.Scan;
+import org.apache.hadoop.hbase.client.Scan.ReadType;
 import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
 import org.apache.hadoop.hbase.exceptions.IllegalArgumentIOException;
@@ -160,11 +161,6 @@ public class TestHStore {
   private static final HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private static final String DIR = TEST_UTIL.getDataTestDir("TestStore").toString();
 
-
-  /**
-   * Setup
-   * @throws IOException
-   */
   @Before
   public void setUp() throws IOException {
     qualifiers.clear();
@@ -216,8 +212,9 @@ public class TestHStore {
     FileSystem fs = FileSystem.get(conf);
 
     fs.delete(logdir, true);
-    ChunkCreator.initialize(MemStoreLABImpl.CHUNK_SIZE_DEFAULT, false,
-      MemStoreLABImpl.CHUNK_SIZE_DEFAULT, 1, 0, null);
+    ChunkCreator.initialize(MemStoreLAB.CHUNK_SIZE_DEFAULT, false,
+      MemStoreLABImpl.CHUNK_SIZE_DEFAULT, 1, 0,
+      null, MemStoreLAB.INDEX_CHUNK_SIZE_PERCENTAGE_DEFAULT);
     RegionInfo info = RegionInfoBuilder.newBuilder(htd.getTableName()).build();
     Configuration walConf = new Configuration(conf);
     CommonFSUtils.setRootDir(walConf, basedir);
@@ -243,7 +240,6 @@ public class TestHStore {
   /**
    * Test we do not lose data if we fail a flush and then close.
    * Part of HBase-10466
-   * @throws Exception
    */
   @Test
   public void testFlushSizeSizing() throws Exception {
@@ -345,7 +341,7 @@ public class TestHStore {
     testDeleteExpiredStoreFiles(1);
   }
 
-  /*
+  /**
    * @param minVersions the MIN_VERSIONS for the column family
    */
   public void testDeleteExpiredStoreFiles(int minVersions) throws Exception {
@@ -470,9 +466,9 @@ public class TestHStore {
   //////////////////////////////////////////////////////////////////////////////
 
   private static final int BLOCKSIZE_SMALL = 8192;
+
   /**
    * Test for hbase-1686.
-   * @throws IOException
    */
   @Test
   public void testEmptyStoreFile() throws IOException {
@@ -510,7 +506,6 @@ public class TestHStore {
 
   /**
    * Getting data from memstore only
-   * @throws IOException
    */
   @Test
   public void testGet_FromMemStoreOnly() throws IOException {
@@ -565,7 +560,6 @@ public class TestHStore {
 
   /**
    * Getting data from files only
-   * @throws IOException
    */
   @Test
   public void testGet_FromFilesOnly() throws IOException {
@@ -604,7 +598,6 @@ public class TestHStore {
 
   /**
    * Getting data from memstore and files
-   * @throws IOException
    */
   @Test
   public void testGet_FromMemStoreAndFiles() throws IOException {
@@ -733,7 +726,7 @@ public class TestHStore {
 
     public FaultyFileSystem() {
       super(new LocalFileSystem());
-      System.err.println("Creating faulty!");
+      LOG.info("Creating faulty!");
     }
 
     @Override
@@ -772,7 +765,7 @@ public class TestHStore {
 
     @Override
     public synchronized void write(byte[] buf, int offset, int length) throws IOException {
-      System.err.println("faulty stream write at pos " + getPos());
+      LOG.info("faulty stream write at pos " + getPos());
       injectFault();
       super.write(buf, offset, length);
     }
@@ -793,13 +786,9 @@ public class TestHStore {
 
   /**
    * Generate a list of KeyValues for testing based on given parameters
-   * @param timestamps
-   * @param numRows
-   * @param qualifier
-   * @param family
    * @return the rows key-value list
    */
-  List<Cell> getKeyValueSet(long[] timestamps, int numRows,
+  private List<Cell> getKeyValueSet(long[] timestamps, int numRows,
       byte[] qualifier, byte[] family) {
     List<Cell> kvList = new ArrayList<>();
     for (int i=1;i<=numRows;i++) {
@@ -1029,7 +1018,7 @@ public class TestHStore {
     assertEquals(0, this.store.getStorefilesCount());
 
     // add some data, flush
-    this.store.add(new KeyValue(row, family, qf1, 1, (byte[])null), null);
+    this.store.add(new KeyValue(row, family, qf1, 1, (byte[]) null), null);
     flush(1);
     // add one more file
     addStoreFile();
@@ -1044,17 +1033,16 @@ public class TestHStore {
     // call second time
     spiedStore.refreshStoreFiles();
 
-    //ensure that replaceStoreFiles is not called if files are not refreshed
-    verify(spiedStore, times(0)).replaceStoreFiles(null, null);
+    // ensure that replaceStoreFiles is not called, i.e, the times does not change, if files are not
+    // refreshed,
+    verify(spiedStore, times(1)).replaceStoreFiles(any(), any());
   }
 
   private long countMemStoreScanner(StoreScanner scanner) {
     if (scanner.currentScanners == null) {
       return 0;
     }
-    return scanner.currentScanners.stream()
-            .filter(s -> !s.isFileScanner())
-            .count();
+    return scanner.currentScanners.stream().filter(s -> !s.isFileScanner()).count();
   }
 
   @Test
@@ -1470,8 +1458,6 @@ public class TestHStore {
    * may change the versionedList. And the first InMemoryFlushRunnable will use the chagned
    * versionedList to remove the corresponding segments.
    * In short, there will be some segements which isn't in merge are removed.
-   * @throws IOException
-   * @throws InterruptedException
    */
   @Test
   public void testRunDoubleMemStoreCompactors() throws IOException, InterruptedException {
@@ -1664,6 +1650,22 @@ public class TestHStore {
     thread.join();
     KeyValueHeap heap2 = thread.getHeap();
     assertFalse(heap.equals(heap2));
+  }
+
+  @Test
+  public void testMaxPreadBytesConfiguredToBeLessThanZero() throws Exception {
+    Configuration conf = HBaseConfiguration.create();
+    conf.set("hbase.hstore.engine.class", DummyStoreEngine.class.getName());
+    // Set 'hbase.storescanner.pread.max.bytes' < 0, so that StoreScanner will be a STREAM type.
+    conf.setLong(StoreScanner.STORESCANNER_PREAD_MAX_BYTES, -1);
+    MyStore store = initMyStore(name.getMethodName(), conf, new MyStoreHook() {});
+    Scan scan = new Scan();
+    scan.addFamily(family);
+    // ReadType on Scan is still DEFAULT only.
+    assertEquals(ReadType.DEFAULT, scan.getReadType());
+    StoreScanner storeScanner = (StoreScanner) store.getScanner(scan,
+        scan.getFamilyMap().get(family), Long.MAX_VALUE);
+    assertFalse(storeScanner.isScanUsePread());
   }
 
   @Test
